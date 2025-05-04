@@ -1,10 +1,15 @@
 # llmfiles/config.py
 """Configuration dataclasses and enums."""
 import sys
+import logging  # Make sure logging is imported if used in __post_init__
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
+
+# Ensure logging is configured if PromptConfig uses it
+logger = logging.getLogger(__name__)
+
 
 class SortMethod(Enum):
     NAME_ASC = "name_asc"
@@ -22,7 +27,7 @@ class SortMethod(Enum):
 class OutputFormat(Enum):
     MARKDOWN = "markdown"
     XML = "xml"
-    JSON = "json" # Represents JSON *output structure*, content often still uses other templates
+    JSON = "json"
 
     @classmethod
     def from_string(cls, s: str) -> Optional['OutputFormat']:
@@ -42,9 +47,29 @@ class TokenCountFormat(Enum):
         except ValueError:
             return None
 
+# --- THIS ENUM MUST BE PRESENT ---
+class PresetTemplate(Enum):
+    DEFAULT = "default"
+    CLAUDE_OPTIMAL = "claude-optimal"
+    GENERIC_XML = "generic-xml"
+
+    @classmethod
+    def from_string(cls, s: str) -> Optional["PresetTemplate"]:
+        try:
+            return cls(s.lower())
+        except ValueError:
+            return None
+
+
+# --- END OF REQUIRED ENUM ---
+
+# Need exceptions for __post_init__
+from .exceptions import ConfigError
+
+
 @dataclass
 class PromptConfig:
-    """Configuration for smart-prompt-builder."""
+    """Configuration for llmfiles."""
     input_paths: List[Path] = field(default_factory=list)
     read_from_stdin: bool = False
     nul_separated: bool = False
@@ -55,6 +80,7 @@ class PromptConfig:
     hidden: bool = False
     follow_symlinks: bool = False
     template_path: Optional[Path] = None
+    preset_template: Optional[PresetTemplate] = None  # Relies on the enum above
     user_vars: Dict[str, str] = field(default_factory=dict)
     output_format: OutputFormat = OutputFormat.MARKDOWN
     line_numbers: bool = False
@@ -69,54 +95,50 @@ class PromptConfig:
     output_file: Optional[Path] = None
     clipboard: bool = False
 
-    # Resolved paths after validation
     resolved_input_paths: List[Path] = field(default_factory=list, init=False)
-    base_dir: Optional[Path] = field(default=None, init=False) # Primary dir for relative paths
+    base_dir: Optional[Path] = field(default=None, init=False)
 
     def __post_init__(self):
         """Validate paths after initialization."""
-        if self.read_from_stdin:
-            # In stdin mode, base_dir needs to be determined carefully,
-            # perhaps using the first explicitly provided path or cwd.
-            # For simplicity now, assume cwd if only stdin is used.
-            self.base_dir = Path.cwd()
-            if self.input_paths:
-                # Use first explicit path as base if provided alongside stdin
-                first_path = self.input_paths[0]
-                try:
-                     resolved = first_path.resolve(strict=True)
-                     self.base_dir = resolved if resolved.is_dir() else resolved.parent
-                     self.resolved_input_paths.append(resolved)
-                except FileNotFoundError:
-                    raise ConfigError(f"Input path does not exist: {first_path}")
-                except Exception as e:
-                     raise ConfigError(f"Error resolving path {first_path}: {e}")
-            self.resolved_input_paths = [] # Paths will come from stdin stream
-        else:
-            if not self.input_paths:
-                raise ConfigError("No input paths provided and not reading from stdin.")
+        # Determine base directory
+        if self.input_paths:
             first_path = self.input_paths[0]
             try:
-                resolved = first_path.resolve(strict=True)
-                # Base dir is the first path if it's a dir, or its parent if it's a file
-                self.base_dir = resolved if resolved.is_dir() else resolved.parent
-                self.resolved_input_paths.append(resolved)
+                resolved_first = first_path.resolve(strict=True)
+                self.base_dir = (
+                    resolved_first if resolved_first.is_dir() else resolved_first.parent
+                )
             except FileNotFoundError:
                 raise ConfigError(f"Input path does not exist: {first_path}")
             except Exception as e:
                 raise ConfigError(f"Error resolving path {first_path}: {e}")
+        elif self.read_from_stdin:
+            self.base_dir = Path.cwd()  # Default to CWD if only stdin
+            logger.info(f"Reading from stdin, using base directory: {self.base_dir}")
+        else:
+            raise ConfigError("No input paths provided and not reading from stdin.")
 
-            # Resolve remaining paths
-            for p in self.input_paths[1:]:
-                 try:
-                     self.resolved_input_paths.append(p.resolve(strict=True))
-                 except FileNotFoundError:
-                    print(f"Warning: Input path skipped (not found): {p}", file=sys.stderr)
-                 except Exception as e:
-                     print(f"Warning: Error resolving path {p}: {e}", file=sys.stderr)
+        # Resolve all input paths
+        self.resolved_input_paths = []
+        for p in self.input_paths:
+            try:
+                self.resolved_input_paths.append(p.resolve(strict=True))
+            except FileNotFoundError:
+                # Use print to stderr for user visibility, logger for internal tracking
+                print(f"Warning: Input path skipped (not found): {p}", file=sys.stderr)
+                logger.warning(f"Input path skipped (not found): {p}")
+            except Exception as e:
+                print(f"Warning: Error resolving path {p}: {e}", file=sys.stderr)
+                logger.warning(f"Error resolving path {p}: {e}")
+
+        # Validation for conflicting template options
+        if self.template_path and self.preset_template:
+            logger.warning(
+                "Both --template and --preset provided. Custom --template will be used."
+            )
+            # PromptConfig is immutable after __post_init__ in standard dataclasses
+            # Logic to prioritize should happen during _load_template in TemplateRenderer
+            # No need to modify self.preset_template here.
 
         if not self.base_dir:
-             raise ConfigError("Could not determine base directory.")
-
-# Need to import exceptions here to avoid circular dependency
-from .exceptions import ConfigError
+            raise ConfigError("Could not determine base directory.")
