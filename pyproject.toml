@@ -1,0 +1,49 @@
+[project]
+name = "llmfiles"
+version = "0.1.0"
+description = "Intelligently build LLM prompts from codebases, git info, and templates."
+readme = "README.md"
+requires-python = ">=3.11" 
+license = { text = "Apache-2.0" } # Or your preferred license
+authors = [
+    { name = "Fred Bliss"}, 
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "click>=8.0",
+    "pathspec>=0.11",
+    "pybars3>=0.9",
+    "tiktoken>=0.5",
+    "pyperclip>=1.8",
+    "rich>=13.0",
+]
+
+[project.scripts]
+llmfiles = "llmfiles.cli:main_cli"
+
+[project.urls]
+Homepage = "https://github.com/fblissjr/llmfiles"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llmfiles"]
+
+[tool.rye] # If using Rye for project management
+managed = true
+dev-dependencies = ["pytest>=7.0", "pytest-cov"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-v --cov=llmfiles --cov-report=term-missing"
