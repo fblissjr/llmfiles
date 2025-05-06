@@ -1,6 +1,5 @@
 # llmfiles/templating.py
 """Handlebars templating logic."""
-
 import logging
 import datetime
 from pathlib import Path
@@ -13,14 +12,15 @@ from .exceptions import TemplateError
 
 logger = logging.getLogger(__name__)
 
-# Define constants for clarity and to avoid literal triple backticks in templates
+# Define constants for clarity
 TRIPLE_BACKTICK = "```"
 CDATA_START = "<![CDATA["
 CDATA_END = "]]>"
 
 # --- Default/Preset Templates ---
+# Updated to use project_root_display_name
 DEFAULT_MARKDOWN_TEMPLATE = rf"""
-Project Path: {{{{ project_root_path }}}}
+Project: {{{{ project_root_display_name }}}}
 
 {{{{#if source_tree}}}}
 Source Tree:
@@ -69,9 +69,11 @@ User Variables:
 {{{{/if}}}}
 """
 
+# Updated to use project_root_display_name and project_root_path_absolute
 DEFAULT_XML_TEMPLATE = rf"""
 <prompt_data>
-    <project_root_path>{{{{ project_root_path }}}}</project_root_path>
+    <project_name>{{{{ project_root_display_name }}}}</project_name>
+    <project_root_path_absolute>{{{{ project_root_path_absolute }}}}</project_root_path_absolute>
 
     {{{{#if source_tree}}}}
     <source_tree>{CDATA_START}
@@ -121,6 +123,7 @@ DEFAULT_XML_TEMPLATE = rf"""
 </prompt_data>
 """
 
+# (PRESET_CLAUDE_OPTIMAL_TEMPLATE remains the same as it defines its own document structure)
 PRESET_CLAUDE_OPTIMAL_TEMPLATE = rf"""
 <documents>
 {{{{#each files}}}}
@@ -134,7 +137,7 @@ PRESET_CLAUDE_OPTIMAL_TEMPLATE = rf"""
 
 {{{{#if source_tree}}}}
 <document index="{{{{claude_indices.source_tree_idx}}}}">
-<source>Project Structure</source>
+<source>Project Structure ({{project_root_display_name}})</source>
 <document_content>{CDATA_START}
 {{{{{{source_tree}}}}}}
 {CDATA_END}</document_content>
@@ -143,7 +146,7 @@ PRESET_CLAUDE_OPTIMAL_TEMPLATE = rf"""
 
 {{{{#if git_diff}}}}
 <document index="{{{{claude_indices.git_diff_idx}}}}" type="staged_diff">
-<source>Staged Git Diff (HEAD vs Index)</source>
+<source>Staged Git Diff (HEAD vs Index) for {{project_root_display_name}}</source>
 <document_content>{CDATA_START}
 {{{{{{git_diff}}}}}}
 {CDATA_END}</document_content>
@@ -152,7 +155,7 @@ PRESET_CLAUDE_OPTIMAL_TEMPLATE = rf"""
 
 {{{{#if git_diff_branches}}}}
 <document index="{{{{claude_indices.git_diff_branches_idx}}}}" type="branch_diff" base="{{{{git_diff_branch_base}}}}" compare="{{{{git_diff_branch_compare}}}}">
-<source>Git Diff ({{{{git_diff_branch_base}}}}..{{{{git_diff_branch_compare}}}})</source>
+<source>Git Diff ({{{{git_diff_branch_base}}}}..{{{{git_diff_branch_compare}}}}) for {{project_root_display_name}}</source>
 <document_content>{CDATA_START}
 {{{{{{git_diff_branches}}}}}}
 {CDATA_END}</document_content>
@@ -161,7 +164,7 @@ PRESET_CLAUDE_OPTIMAL_TEMPLATE = rf"""
 
 {{{{#if git_log_branches}}}}
 <document index="{{{{claude_indices.git_log_branches_idx}}}}" type="branch_log" base="{{{{git_log_branch_base}}}}" compare="{{{{git_log_branch_compare}}}}">
-<source>Git Log ({{{{git_log_branch_base}}}}..{{{{git_log_branch_compare}}}})</source>
+<source>Git Log ({{{{git_log_branch_base}}}}..{{{{git_log_branch_compare}}}}) for {{project_root_display_name}}</source>
 <document_content>{CDATA_START}
 {{{{{{git_log_branches}}}}}}
 {CDATA_END}</document_content>
@@ -170,7 +173,7 @@ PRESET_CLAUDE_OPTIMAL_TEMPLATE = rf"""
 
 {{{{#if user_vars}}}}
 <document index="{{{{claude_indices.user_vars_idx}}}}" type="user_variables">
-<source>User Variables</source>
+<source>User Variables for {{project_root_display_name}}</source>
 <document_content>{CDATA_START}
 {{{{#each user_vars}}}}
 {{{{@key}}}}: {{{{this}}}}
@@ -186,7 +189,6 @@ PRESET_CLAUDE_OPTIMAL_TEMPLATE = rf"""
 # --- Handlebars Helpers ---
 def _add_helper(_this, *args):
     """Simple addition helper."""
-    # Filter out None or non-numeric types before summing
     numeric_args = [arg for arg in args if isinstance(arg, (int, float))]
     return sum(numeric_args)
 
@@ -194,11 +196,9 @@ def _add_helper(_this, *args):
 # --- Template Renderer Class ---
 class TemplateRenderer:
     """Handles loading and rendering Handlebars templates."""
-
     def __init__(self, config: PromptConfig):
         self.config = config
         self.handlebars = pybars.Compiler()
-        # Register helpers
         self.helpers = {
             "add": _add_helper,
             "now": lambda _this, *args: datetime.datetime.now().isoformat(),
@@ -211,7 +211,6 @@ class TemplateRenderer:
 
     def _load_template(self) -> str:
         """Loads template content based on config priority."""
-        # Priority: --template > --preset > --output-format > default
         if self.config.template_path:
             logger.info(f"Loading custom template from: {self.config.template_path}")
             try:
@@ -234,14 +233,11 @@ class TemplateRenderer:
                 )
                 return DEFAULT_MARKDOWN_TEMPLATE
         else:
-            # Fallback based on output format
             logger.info(
                 f"Using default template for format: {self.config.output_format.value}"
             )
             if self.config.output_format == OutputFormat.XML:
                 return DEFAULT_XML_TEMPLATE
-            # Default to Markdown for JSON output format as well (structure handled later)
-            # or if format is explicitly Markdown
             return DEFAULT_MARKDOWN_TEMPLATE
 
     def render(self, context: Dict[str, Any]) -> str:
@@ -265,14 +261,13 @@ def _build_tree_string(file_data: List[Dict[str, Any]], config: PromptConfig) ->
 
     tree: Dict[str, Any] = {}
     base_dir = config.base_dir
-    # Handle edge case where base_dir might be root ('/') which has no name
-    base_name = base_dir.name if base_dir.name else str(base_dir)
+    base_name = base_dir.name if base_dir and base_dir.name else str(base_dir)
 
     for item in file_data:
         try:
             relative_path = Path(item.get("relative_path", ""))
             if not relative_path.parts:
-                continue  # Skip empty or root paths
+                continue
 
             parts = list(relative_path.parts)
             current_level = tree
@@ -283,14 +278,12 @@ def _build_tree_string(file_data: List[Dict[str, Any]], config: PromptConfig) ->
                         "_type": "file" if is_last_part else "dir",
                         "_children": {},
                     }
-                # Update type if we see it as a dir part later
                 if not is_last_part and current_level[part]["_type"] == "file":
                     current_level[part]["_type"] = "dir"
                 if not is_last_part:
-                    if "_children" not in current_level[part]:  # Ensure dict exists
+                    if "_children" not in current_level[part]:
                         current_level[part]["_children"] = {}
                     current_level = current_level[part]["_children"]
-
         except Exception as e:
             logger.warning(
                 f"Error processing path for tree generation '{item.get('relative_path')}': {e}"
@@ -300,9 +293,7 @@ def _build_tree_string(file_data: List[Dict[str, Any]], config: PromptConfig) ->
         node: Dict[str, Any], indent: str = "", is_last_level: bool = True
     ) -> List[str]:
         lines = []
-        sorted_keys = sorted(
-            [k for k in node if not k.startswith("_")]
-        )  # Ignore meta keys
+        sorted_keys = sorted([k for k in node if not k.startswith("_")])
 
         for i, key in enumerate(sorted_keys):
             item = node[key]
@@ -312,7 +303,6 @@ def _build_tree_string(file_data: List[Dict[str, Any]], config: PromptConfig) ->
 
             if item["_type"] == "dir":
                 new_indent = indent + ("    " if is_current_item_last else "│   ")
-                # Ensure children exist before recursing
                 lines.extend(
                     format_tree(
                         item.get("_children", {}), new_indent, is_current_item_last
@@ -337,14 +327,21 @@ def build_template_context(
     logger.info("Building template context...")
 
     if not config.base_dir or not config.base_dir.is_absolute():
-         raise TemplateError("Base directory is not configured or resolved.")
+        raise TemplateError(
+            "Base directory is not configured or resolved for context building."
+        )
 
     source_tree_str = _build_tree_string(file_data, config)
 
-    # Calculate Claude indices if needed
+    project_display_name = (
+        config.base_dir.name
+        if config.base_dir and config.base_dir.name
+        else str(config.base_dir)
+    )
+
     claude_indices = {}
     if config.preset_template == PresetTemplate.CLAUDE_OPTIMAL:
-        idx = len(file_data) + 1  # Start indexing after files
+        idx = len(file_data) + 1
         has_tree = source_tree_str and source_tree_str != "(No files included)"
         if has_tree:
             claude_indices["source_tree_idx"] = idx
@@ -362,7 +359,8 @@ def build_template_context(
             claude_indices["user_vars_idx"] = idx
 
     context = {
-        "project_root_path": str(config.base_dir),
+        "project_root_path_absolute": str(config.base_dir),  # Full absolute path
+        "project_root_display_name": project_display_name,  # Just the directory name
         "source_tree": source_tree_str
         if source_tree_str != "(No files included)"
         else None,
@@ -383,12 +381,9 @@ def build_template_context(
         "git_log_branch_compare": config.git_log_branch[1]
         if config.git_log_branch
         else None,
-        "claude_indices": claude_indices
-        if claude_indices
-        else None,  # Only add if populated
+        "claude_indices": claude_indices if claude_indices else None,
     }
 
-    # Filter out root-level None values, empty lists, empty dicts for cleaner templates
     context = {
         k: v
         for k, v in context.items()
