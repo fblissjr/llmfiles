@@ -1,75 +1,58 @@
 # llmfiles/config.py
-"""Configuration dataclasses and enums."""
-import sys
-import logging  # Make sure logging is imported if used in __post_init__
+"""Configuration dataclasses and enums for llmfiles."""
+
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Set
 
-# Ensure logging is configured if PromptConfig uses it
+from .exceptions import ConfigError
+
 logger = logging.getLogger(__name__)
 
 
 class SortMethod(Enum):
-    NAME_ASC = "name_asc"
-    NAME_DESC = "name_desc"
-    DATE_ASC = "date_asc"
-    DATE_DESC = "date_desc"
+    NAME_ASC, NAME_DESC, DATE_ASC, DATE_DESC = (
+        "name_asc",
+        "name_desc",
+        "date_asc",
+        "date_desc",
+    )
 
     @classmethod
-    def from_string(cls, s: str) -> Optional['SortMethod']:
-        try:
-            return cls(s.lower())
-        except ValueError:
-            return None
+    def from_string(cls, s: str) -> Optional["SortMethod"]:
+        return cls(s.lower()) if s else None
+
 
 class OutputFormat(Enum):
-    MARKDOWN = "markdown"
-    XML = "xml"
-    JSON = "json"
+    MARKDOWN, XML, JSON = "markdown", "xml", "json"
 
     @classmethod
-    def from_string(cls, s: str) -> Optional['OutputFormat']:
-        try:
-            return cls(s.lower())
-        except ValueError:
-            return None
+    def from_string(cls, s: str) -> Optional["OutputFormat"]:
+        return cls(s.lower()) if s else None
+
 
 class TokenCountFormat(Enum):
-    HUMAN = "human"
-    RAW = "raw"
+    HUMAN, RAW = "human", "raw"
 
     @classmethod
-    def from_string(cls, s: str) -> Optional['TokenCountFormat']:
-        try:
-            return cls(s.lower())
-        except ValueError:
-            return None
+    def from_string(cls, s: str) -> Optional["TokenCountFormat"]:
+        return cls(s.lower()) if s else None
 
-# --- THIS ENUM MUST BE PRESENT ---
+
 class PresetTemplate(Enum):
-    DEFAULT = "default"
-    CLAUDE_OPTIMAL = "claude-optimal"
-    GENERIC_XML = "generic-xml"
-
+    DEFAULT, CLAUDE_OPTIMAL, GENERIC_XML = "default", "claude-optimal", "generic-xml"
     @classmethod
     def from_string(cls, s: str) -> Optional["PresetTemplate"]:
-        try:
-            return cls(s.lower())
-        except ValueError:
-            return None
+        return cls(s.lower()) if s else None
 
-
-# --- END OF REQUIRED ENUM ---
-
-# Need exceptions for __post_init__
-from .exceptions import ConfigError
-
+DEFAULT_YAML_TRUNCATION_PLACEHOLDER = "<content truncated due to length>"
+DEFAULT_YAML_TRUNCATE_CONTENT_MAX_LEN = 500
 
 @dataclass
 class PromptConfig:
-    """Configuration for llmfiles."""
+    """Holds all configuration for generating a prompt."""
     input_paths: List[Path] = field(default_factory=list)
     read_from_stdin: bool = False
     nul_separated: bool = False
@@ -80,12 +63,15 @@ class PromptConfig:
     hidden: bool = False
     follow_symlinks: bool = False
     template_path: Optional[Path] = None
-    preset_template: Optional[PresetTemplate] = None  # Relies on the enum above
+    preset_template: Optional[PresetTemplate] = None
     user_vars: Dict[str, str] = field(default_factory=dict)
     output_format: OutputFormat = OutputFormat.MARKDOWN
     line_numbers: bool = False
     no_codeblock: bool = False
     absolute_paths: bool = False
+    process_yaml_truncate_long_fields: bool = False
+    yaml_truncate_placeholder: str = DEFAULT_YAML_TRUNCATION_PLACEHOLDER
+    yaml_truncate_content_max_len: int = DEFAULT_YAML_TRUNCATE_CONTENT_MAX_LEN
     sort_method: SortMethod = SortMethod.NAME_ASC
     diff: bool = False
     git_diff_branch: Optional[Tuple[str, str]] = None
@@ -96,49 +82,40 @@ class PromptConfig:
     clipboard: bool = False
 
     resolved_input_paths: List[Path] = field(default_factory=list, init=False)
-    base_dir: Optional[Path] = field(default=None, init=False)
+    base_dir: Path = field(init=False)
 
     def __post_init__(self):
-        """Validate paths after initialization."""
-        # Determine base directory
-        if self.input_paths:
-            first_path = self.input_paths[0]
-            try:
-                resolved_first = first_path.resolve(strict=True)
-                self.base_dir = (
-                    resolved_first if resolved_first.is_dir() else resolved_first.parent
-                )
-            except FileNotFoundError:
-                raise ConfigError(f"Input path does not exist: {first_path}")
-            except Exception as e:
-                raise ConfigError(f"Error resolving path {first_path}: {e}")
-        elif self.read_from_stdin:
-            self.base_dir = Path.cwd()  # Default to CWD if only stdin
-            logger.info(f"Reading from stdin, using base directory: {self.base_dir}")
-        else:
-            raise ConfigError("No input paths provided and not reading from stdin.")
+        """Determines `base_dir` after other fields are initialized."""
+        candidate_paths: Set[Path] = set()
+        if self.input_paths:  # Prefer explicitly provided paths for base_dir
+            for p_str in self.input_paths:
+                try:
+                    candidate_paths.add(Path(p_str).resolve(strict=True))
+                except FileNotFoundError:
+                    logger.warning(f"Input path '{p_str}' for base_dir not found.")
+                except Exception as e:
+                    logger.warning(f"Error resolving '{p_str}' for base_dir: {e}")
 
-        # Resolve all input paths
-        self.resolved_input_paths = []
-        for p in self.input_paths:
-            try:
-                self.resolved_input_paths.append(p.resolve(strict=True))
-            except FileNotFoundError:
-                # Use print to stderr for user visibility, logger for internal tracking
-                print(f"Warning: Input path skipped (not found): {p}", file=sys.stderr)
-                logger.warning(f"Input path skipped (not found): {p}")
-            except Exception as e:
-                print(f"Warning: Error resolving path {p}: {e}", file=sys.stderr)
-                logger.warning(f"Error resolving path {p}: {e}")
+        if candidate_paths:
+            first_valid = next(iter(candidate_paths))
+            self.base_dir = (
+                first_valid if first_valid.is_dir() else first_valid.parent
+            ).resolve()
+        else:  # Fallback to CWD if no valid input_paths or only stdin
+            self.base_dir = Path.cwd().resolve()
+            logger.info(
+                f"Base directory defaulted to CWD: {self.base_dir} (no valid input paths or only stdin)."
+            )
 
-        # Validation for conflicting template options
+        if not self.base_dir.is_absolute():  # Should be absolute after resolve()
+            raise ConfigError(
+                f"Internal error: base_dir '{self.base_dir}' is not absolute."
+            )
+
         if self.template_path and self.preset_template:
             logger.warning(
-                "Both --template and --preset provided. Custom --template will be used."
+                f"Custom template '{self.template_path}' will override preset '{self.preset_template.value}'."
             )
-            # PromptConfig is immutable after __post_init__ in standard dataclasses
-            # Logic to prioritize should happen during _load_template in TemplateRenderer
-            # No need to modify self.preset_template here.
-
-        if not self.base_dir:
-            raise ConfigError("Could not determine base directory.")
+        logger.debug(
+            f"PromptConfig initialized. Base_dir: {self.base_dir}. YAML truncate: {self.process_yaml_truncate_long_fields}"
+        )

@@ -1,5 +1,6 @@
 # llmfiles/cli.py
-"""Command Line Interface using Click."""
+"""Command Line Interface for llmfiles, using Click."""
+
 import click
 import sys
 import logging
@@ -7,611 +8,597 @@ import json
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
-import tiktoken
-from rich.progress import Progress, SpinnerColumn, TextColumn
-# Assuming logger is configured at the root or here
-logging.basicConfig(
-    level=logging.WARNING, format="%(levelname)-8s [%(name)s] %(message)s"
-)
-logger = logging.getLogger(__name__)
+import tiktoken  # type: ignore
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 
-# Relative imports for sibling modules
 from .config import (
     PromptConfig,
     SortMethod,
     OutputFormat,
     TokenCountFormat,
     PresetTemplate,
+    DEFAULT_YAML_TRUNCATION_PLACEHOLDER,
+    DEFAULT_YAML_TRUNCATE_CONTENT_MAX_LEN,
 )
 from .discovery import discover_paths
-from .processing import process_file_content
+from .processing import (
+    process_file_content,
+    PYYAML_AVAILABLE,
+)  # Import PYYAML_AVAILABLE
 from .git_utils import get_diff, get_diff_branches, get_log_branches, check_is_git_repo
 from .templating import TemplateRenderer, build_template_context
 from .output import write_to_stdout, write_to_file, copy_to_clipboard
 from .exceptions import SmartPromptBuilderError, TokenizerError, ConfigError
+from . import __version__ as app_version  # Import version from __init__.py
 
-# --- Generator Class ---
+logger = logging.getLogger(__name__)  # Logger for this module: llmfiles.cli
+
+
 class PromptGenerator:
+    """Orchestrates prompt generation steps."""
     def __init__(self, config: PromptConfig):
-        self.config = config
-        self.file_data: List[Dict[str, Any]] = []
-        self.git_diff_data: Optional[str] = None
-        self.git_diff_branches_data: Optional[str] = None
-        self.git_log_branches_data: Optional[str] = None
-        self.rendered_prompt: Optional[str] = None
-        self.token_count: Optional[int] = None
+        self.config, self.file_data = config, []
+        self.git_diff_data, self.git_diff_branches_data, self.git_log_branches_data = (
+            None,
+            None,
+            None,
+        )
+        self.rendered_prompt, self.token_count = None, None
 
-    def _discover_and_filter_paths(self):
-        """Generates filtered paths based on config."""
-        logger.info("Discovering and filtering paths...")
-        yield from discover_paths(self.config)
+    def _discover_paths(self) -> List[Path]:
+        logger.info("Step 1: Discovering paths...")
+        paths = list(discover_paths(self.config))
+        logger.info(f"Discovery found {len(paths)} potential paths.")
+        return paths
 
-    def _process_file_contents(self):
-        """Reads and processes content for filtered files."""
-        logger.info("Processing file contents...")
-        temp_file_data = []
-        processed_count = 0
-        skipped_count = 0
-        for path in self._discover_and_filter_paths():
-            processed_data = process_file_content(path, self.config)
-            if processed_data:
-                content, raw_content, mod_time = processed_data
-                if self.config.base_dir is None:
-                    # This should ideally be caught during config validation
-                    raise ConfigError("Base directory not set during file processing.")
-                relative_path = path.relative_to(self.config.base_dir)
-                abs_path_str = str(path)
-                rel_path_str = str(relative_path)
-                file_entry = {
-                    "path": abs_path_str
-                    if self.config.absolute_paths
-                    else rel_path_str,
-                    "relative_path": rel_path_str,
+    def _process_contents(self, paths: List[Path], progress: Progress) -> None:
+        logger.info(f"Step 2: Processing content for {len(paths)} paths...")
+        task = progress.add_task("Processing files...", total=len(paths))
+        processed, skipped = 0, 0
+        for p_obj in paths:
+            res = process_file_content(p_obj, self.config)
+            if res:
+                content, raw_content, mod_time = res
+                rel_p = (
+                    p_obj.relative_to(self.config.base_dir)
+                    if p_obj.is_relative_to(self.config.base_dir)
+                    else p_obj.name
+                )
+                entry: Dict[str, Any] = {
+                    "path": str(p_obj) if self.config.absolute_paths else str(rel_p),
+                    "relative_path": str(rel_p),
                     "content": content,
                     "raw_content": raw_content,
-                    "extension": path.suffix[1:].lower() if path.suffix else "",
-                    "mod_time": mod_time,
+                    "extension": p_obj.suffix[1:].lower() if p_obj.suffix else "",
                 }
-                temp_file_data.append(file_entry)
-                processed_count += 1
+                if mod_time is not None:
+                    entry["mod_time"] = mod_time
+                self.file_data.append(entry)
+                processed += 1
             else:
-                skipped_count += 1
-        self.file_data = temp_file_data
-        logger.info(
-            f"Finished processing files. Included: {processed_count}, Skipped: {skipped_count}"
+                skipped += 1
+            progress.update(task, advance=1)
+        progress.update(
+            task, description=f"Processed {processed} files (skipped {skipped})."
         )
 
-    def _sort_file_data(self):
-        """Sorts the collected file data based on config."""
-        logger.info(f"Sorting file data by {self.config.sort_method.value}...")
-        sort_key = None
-        reverse = False
-
-        if self.config.sort_method == SortMethod.NAME_ASC:
-            sort_key = lambda x: x["relative_path"]
-        elif self.config.sort_method == SortMethod.NAME_DESC:
-            sort_key = lambda x: x["relative_path"]
-            reverse = True
-        elif self.config.sort_method == SortMethod.DATE_ASC:
-            sort_key = (
-                lambda x: x.get("mod_time")
-                if x.get("mod_time") is not None
-                else float("inf")
-            )
-        elif self.config.sort_method == SortMethod.DATE_DESC:
-            sort_key = (
-                lambda x: x.get("mod_time")
-                if x.get("mod_time") is not None
-                else float("-inf")
-            )
-            reverse = True
-
-        if sort_key:
+    def _sort_data(self) -> None:
+        logger.info(
+            f"Step 3: Sorting {len(self.file_data)} entries by '{self.config.sort_method.value}'..."
+        )
+        key_fn: Optional[Any] = None
+        rev = False
+        sm = self.config.sort_method
+        if sm == SortMethod.NAME_ASC:
+            key_fn = lambda x: x["relative_path"]
+        elif sm == SortMethod.NAME_DESC:
+            key_fn, rev = lambda x: x["relative_path"], True
+        elif sm == SortMethod.DATE_ASC:
+            key_fn = lambda x: x.get("mod_time", float("inf"))
+        elif sm == SortMethod.DATE_DESC:
+            key_fn, rev = lambda x: x.get("mod_time", float("-inf")), True
+        if key_fn:
             try:
-                self.file_data.sort(key=sort_key, reverse=reverse)
-                logger.debug("File data sorted.")
+                self.file_data.sort(key=key_fn, reverse=rev)
             except Exception as e:
-                logger.warning(
-                    f"Could not sort file data: {e}. Proceeding without sorting."
-                )
-        else:
-            logger.debug("No sorting key defined, skipping sort.")
+                logger.warning(f"Sort failed: {e}. Proceeding unsorted.")
 
-
-    def _fetch_git_info(self):
-        """Fetches Git information if configured."""
-        if self.config.base_dir is None:
-            logger.warning("Base directory not set, cannot perform Git operations.")
-            return
-
-        repo_path = self.config.base_dir
-        is_repo = check_is_git_repo(repo_path)
-        if not is_repo:
-            if (
-                self.config.diff
-                or self.config.git_diff_branch
-                or self.config.git_log_branch
+    def _fetch_git(self) -> None:
+        logger.info("Step 4: Fetching Git info (if configured)...")
+        if not self.config.base_dir or not check_is_git_repo(self.config.base_dir):
+            if any(
+                [
+                    self.config.diff,
+                    self.config.git_diff_branch,
+                    self.config.git_log_branch,
+                ]
             ):
                 logger.warning(
-                    f"Path {repo_path} is not a git repository. Skipping git operations."
+                    f"Not a Git repo or Git unavailable at {self.config.base_dir}. Skipping Git ops."
                 )
             return
-
         try:
             if self.config.diff:
-                logger.info("Fetching staged Git diff...")
-                self.git_diff_data = get_diff(repo_path)
+                self.git_diff_data = get_diff(self.config.base_dir)
             if self.config.git_diff_branch:
                 b1, b2 = self.config.git_diff_branch
-                logger.info(f"Fetching Git diff between {b1} and {b2}...")
-                self.git_diff_branches_data = get_diff_branches(repo_path, b1, b2)
+                self.git_diff_branches_data = get_diff_branches(
+                    self.config.base_dir, b1, b2
+                )
             if self.config.git_log_branch:
                 b1, b2 = self.config.git_log_branch
-                logger.info(f"Fetching Git log between {b1} and {b2}...")
-                self.git_log_branches_data = get_log_branches(repo_path, b1, b2)
+                self.git_log_branches_data = get_log_branches(
+                    self.config.base_dir, b1, b2
+                )
         except SmartPromptBuilderError as e:
-            logger.error(f"Git operation failed: {e}")
-            # Decide whether to halt or continue without git info
-            # For now, just log the error and continue
+            logger.error(f"Git op failed: {e}. Info might be missing.")
 
-    def _render(self):
-        """Builds context and renders the template."""
-        logger.info("Rendering the final prompt...")
-        context = build_template_context(
+    def _render(self) -> None:
+        logger.info("Step 5: Rendering prompt...")
+        ctx = build_template_context(
             self.config,
             self.file_data,
             self.git_diff_data,
             self.git_diff_branches_data,
-            self.git_log_branches_data
+            self.git_log_branches_data,
         )
-        renderer = TemplateRenderer(self.config)
-        self.rendered_prompt = renderer.render(context)
+        self.rendered_prompt = TemplateRenderer(self.config).render(ctx)
 
-    def _calculate_tokens(self):
-        """Calculates token count if an encoding is specified."""
+    def _count_tokens(self) -> None:
         if self.config.show_tokens_format and self.rendered_prompt:
-            logger.info(f"Calculating token count using encoding: {self.config.encoding}")
+            logger.info(f"Step 6: Counting tokens (enc: '{self.config.encoding}')...")
             try:
-                # Ensure encoding is valid before getting it
-                tiktoken.encoding_for_model(
+                enc = tiktoken.get_encoding(
                     self.config.encoding
-                )  # Raises ValueError if invalid
-                enc = tiktoken.get_encoding(self.config.encoding)
-                tokens = enc.encode(
-                    self.rendered_prompt, disallowed_special=()
-                )  # Allow special tokens during count
-                self.token_count = len(tokens)
+                )  # Validated by encoding_for_model if desired
+                self.token_count = len(
+                    enc.encode(self.rendered_prompt, disallowed_special=())
+                )
                 logger.info(f"Token count: {self.token_count}")
-            except ValueError:
-                # This error comes from encoding_for_model if name is unknown
-                raise TokenizerError(f"Invalid or unsupported encoding: {self.config.encoding}")
             except Exception as e:
-                 raise TokenizerError(f"Failed to calculate tokens: {e}")
-
-
-    def generate(self) -> str:
-        """Orchestrates the prompt generation process."""
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            transient=True,
-        ) as progress:
-            task_discover = progress.add_task(
-                "Discovering & Processing Files...", total=None
-            )
-            self._process_file_contents()  # Includes discovery yields and processing
-            progress.update(
-                task_discover,
-                completed=1,
-                description=f"Processed {len(self.file_data)} files.",
-            )
-
-            task_sort = progress.add_task("Sorting file data...", total=None)
-            self._sort_file_data()
-            progress.update(task_sort, completed=1, description="File data sorted.")
-
-            if (
-                self.config.diff
-                or self.config.git_diff_branch
-                or self.config.git_log_branch
-            ):
-                task_git = progress.add_task("Fetching Git info...", total=None)
-                self._fetch_git_info()
-                progress.update(task_git, completed=1, description="Git info fetched.")
-
-            task_render = progress.add_task("Rendering prompt...", total=None)
-            self._render()
-            progress.update(task_render, completed=1, description="Prompt rendered.")
-
-            if self.config.show_tokens_format:
-                task_tokens = progress.add_task("Calculating tokens...", total=None)
-                self._calculate_tokens()
-                progress.update(
-                    task_tokens,
-                    completed=1,
-                    description=f"Tokens calculated ({self.token_count}).",
+                raise TokenizerError(
+                    f"Token calculation failed for '{self.config.encoding}': {e}"
                 )
 
-        if self.rendered_prompt is None:
-            # This case should ideally be prevented by raising errors earlier
-            raise SmartPromptBuilderError("Prompt generation failed to produce output.")
+    def generate(self) -> str:
+        """Main pipeline to generate the prompt."""
+        use_progress = logger.getEffectiveLevel() <= logging.INFO
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            transient=False,
+            disable=not use_progress,
+        ) as prog:
+            paths = self._discover_paths()
+            prog.update(
+                prog.add_task("Discovering paths...", total=1),
+                completed=1,
+                description=f"Found {len(paths)} potential paths.",
+            )
+            if paths:
+                self._process_contents(paths, prog)
+            else:
+                prog.update(
+                    prog.add_task("Processing files...", total=1),
+                    completed=1,
+                    description="No files to process.",
+                )
+            self._sort_data()
+            prog.update(
+                prog.add_task("Sorting files...", total=1),
+                completed=1,
+                description=f"Sorted {len(self.file_data)} files.",
+            )
+            if any(
+                [
+                    self.config.diff,
+                    self.config.git_diff_branch,
+                    self.config.git_log_branch,
+                ]
+            ):
+                self._fetch_git()
+                prog.update(
+                    prog.add_task("Fetching Git...", total=1),
+                    completed=1,
+                    description="Git info fetched.",
+                )
+            self._render()
+            prog.update(
+                prog.add_task("Rendering...", total=1),
+                completed=1,
+                description="Prompt rendered.",
+            )
+            if self.config.show_tokens_format:
+                self._count_tokens()
+                tc_str = str(self.token_count) if self.token_count else "N/A"
+                prog.update(
+                    prog.add_task("Counting tokens...", total=1),
+                    completed=1,
+                    description=f"Tokens: {tc_str}.",
+                )
+        if not self.rendered_prompt:
+            raise SmartPromptBuilderError("Prompt generation resulted in no content.")
         return self.rendered_prompt
 
+def _run_main_flow(config: PromptConfig):
+    """Executes the default prompt generation and output logic."""
+    try:
+        generator = PromptGenerator(config)
+        final_prompt = generator.generate()
 
-# --- Click CLI Definition ---
-@click.command(context_settings=dict(help_option_names=["-h", "--help"]))
-@click.argument(
-    "input_paths_arg",
-    nargs=-1,
-    type=click.Path(exists=True, readable=True, path_type=Path),
+        output_content: str
+        is_json = config.output_format == OutputFormat.JSON
+        if is_json:
+            payload: Dict[str, Any] = {
+                "prompt_content": final_prompt,
+                "metadata": {
+                    "base_dir": str(config.base_dir),
+                    "files_count": len(generator.file_data),
+                },
+            }
+            if generator.token_count is not None:
+                payload["token_info"] = {
+                    "count": generator.token_count,
+                    "encoding": config.encoding,
+                }
+            try:
+                output_content = json.dumps(payload, indent=2) + "\n"
+            except TypeError as e:
+                logger.error(f"JSON serialization failed: {e}", exc_info=True)
+                output_content, is_json = final_prompt, False  # Fallback
+        else:
+            output_content = final_prompt
+
+        # Output handling
+        out_done = False
+        if config.output_file:
+            write_to_file(config.output_file, output_content)
+            click.echo(f"Output to: {config.output_file}", err=True)
+            out_done = True
+        cb_ok = False
+        if config.clipboard:
+            cb_content = final_prompt if is_json else output_content
+            if copy_to_clipboard(cb_content.strip()):
+                cb_ok = True
+            out_done = True
+        if not out_done or (config.clipboard and not cb_ok):
+            if config.clipboard and not cb_ok:
+                click.echo(
+                    "Clipboard copy failed. Outputting to stdout.", file=sys.stderr
+                )
+            write_to_stdout(output_content)
+
+        if config.show_tokens_format and generator.token_count is not None:
+            fmt = (
+                TokenCountFormat.HUMAN
+                if config.show_tokens_format == TokenCountFormat.HUMAN
+                else TokenCountFormat.RAW
+            )
+            tc_disp = (
+                f"{generator.token_count:,}"
+                if fmt == TokenCountFormat.HUMAN
+                else str(generator.token_count)
+            )
+            click.echo(f"Token count ({config.encoding}): {tc_disp}", err=True)
+        elif config.show_tokens_format:
+            click.echo(f"Token count ({config.encoding}): N/A", err=True)
+
+    except SmartPromptBuilderError as e:
+        click.echo(f"ERROR: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        logger.critical("Unexpected error in main flow.", exc_info=True)
+        click.echo(f"UNEXPECTED ERROR: {e}", err=True)
+        sys.exit(1)
+
+@click.group(
+    context_settings=dict(help_option_names=["-h", "--help"]),
+    invoke_without_command=True,
 )
 @click.option(
-    "--stdin",
-    "read_from_stdin",
-    is_flag=True,
-    help="Read list of NUL or newline separated paths from stdin.",
+    "--input-path",
+    "cli_input_paths",
+    multiple=True,
+    type=click.Path(readable=True, path_type=Path),
+    help="Paths to include (file/dir). Default: '.' if not stdin.",
+)
+@click.option(
+    "--stdin", "cli_read_from_stdin", is_flag=True, help="Read paths from stdin."
 )
 @click.option(
     "-0",
     "--null",
-    "nul_separated",
+    "cli_nul_separated_stdin",
     is_flag=True,
-    help="Input paths from stdin are NUL-separated (recommended for use with find ... -print0).",
+    help="Stdin paths are NUL-separated.",
 )
 @click.option(
     "-i",
     "--include",
-    "include_patterns",
+    "cli_include_patterns",
     multiple=True,
-    help='Glob pattern(s) to include files/dirs (e.g., "*.py", "src/**"). Applied relative to input paths.',
+    help="Glob patterns to include.",
 )
 @click.option(
     "-e",
     "--exclude",
-    "exclude_patterns",
+    "cli_exclude_patterns",
     multiple=True,
-    help='Glob pattern(s) to exclude files/dirs (e.g., "**/__pycache__", "*.tmp"). Applied relative to input paths.',
+    help="Glob patterns to exclude.",
 )
 @click.option(
     "--include-priority",
+    "cli_force_include_over_exclude",
     is_flag=True,
-    default=False,
-    help="Include files matching both --include and --exclude.",
+    help="--include overrides --exclude.",
 )
 @click.option(
     "--no-ignore",
+    "cli_disable_gitignore",
     is_flag=True,
-    default=False,
-    help="Ignore rules from .gitignore files.",
+    help="Ignore .gitignore files.",
 )
 @click.option(
     "--hidden",
+    "cli_include_hidden_files",
     is_flag=True,
-    default=False,
-    help='Include hidden files/directories (those starting with ".").',
+    help="Include hidden files/dirs.",
 )
 @click.option(
     "-L",
     "--follow-symlinks",
+    "cli_traverse_symlinks",
     is_flag=True,
-    default=False,
-    help="Follow symbolic links during directory traversal.",
+    help="Follow symlinks.",
 )
 @click.option(
     "-t",
     "--template",
-    "template_path",
+    "cli_custom_template_path",
     type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
-    help="Path to a custom Handlebars template file (overrides --preset and --output-format).",
+    help="Path to custom Handlebars template.",
 )
 @click.option(
     "--preset",
-    "preset_template_str",
-    type=click.Choice([p.value for p in PresetTemplate], case_sensitive=False),
-    help="Use a built-in preset template (e.g., claude-optimal, generic-xml, default). Overrides --output-format.",
+    "cli_selected_preset_template_str",
+    type=click.Choice([p.value for p in PresetTemplate]),
+    help="Use a built-in preset template.",
 )
 @click.option(
     "--var",
-    "user_vars_list",
+    "cli_user_template_variables_list",
     multiple=True,
-    metavar="KEY=VALUE",
-    help="User variables for custom templates (e.g., --var project_name=MyLib).",
+    metavar="K=V",
+    help="User variables for templates.",
 )
 @click.option(
     "-F",
     "--output-format",
-    type=click.Choice([f.value for f in OutputFormat], case_sensitive=False),
+    "cli_fallback_output_format_str",
+    type=click.Choice([f.value for f in OutputFormat]),
     default=OutputFormat.MARKDOWN.value,
-    help="Fallback output format if no template/preset is specified (markdown, xml, json).",
+    show_default=True,
+    help="Fallback output format.",
 )
-@click.option('-n', '--line-numbers', is_flag=True, default=False, help='Prepend line numbers to code content.')
-@click.option('--no-codeblock', is_flag=True, default=False, help='Do not wrap code content in Markdown code blocks.')
+@click.option(
+    "-n",
+    "--line-numbers",
+    "cli_show_line_numbers",
+    is_flag=True,
+    help="Prepend line numbers.",
+)
+@click.option(
+    "--no-codeblock",
+    "cli_disable_markdown_codeblocks",
+    is_flag=True,
+    help="No Markdown code blocks.",
+)
 @click.option(
     "--absolute-paths",
+    "cli_use_absolute_paths_in_output",
     is_flag=True,
-    default=False,
-    help="Use absolute paths in output context instead of relative.",
+    help="Use absolute file paths in context.",
+)
+@click.option(
+    "--yaml-truncate-long-fields",
+    "cli_process_yaml_truncate_long_fields",
+    is_flag=True,
+    help="Truncate long fields in YAML (needs PyYAML).",
+)
+@click.option(
+    "--yaml-placeholder",
+    "cli_yaml_truncate_placeholder",
+    default=DEFAULT_YAML_TRUNCATION_PLACEHOLDER,
+    show_default=True,
+    help="Placeholder for truncated YAML content.",
+)
+@click.option(
+    "--yaml-max-len",
+    "cli_yaml_truncate_content_max_len",
+    type=int,
+    default=DEFAULT_YAML_TRUNCATE_CONTENT_MAX_LEN,
+    show_default=True,
+    help="Max length for YAML field truncation.",
 )
 @click.option(
     "--sort",
-    "sort_method_str",
-    type=click.Choice([s.value for s in SortMethod], case_sensitive=False),
+    "cli_file_sort_method_str",
+    type=click.Choice([s.value for s in SortMethod]),
     default=SortMethod.NAME_ASC.value,
-    help="Sort included files by method (name_asc, name_desc, date_asc, date_desc).",
+    show_default=True,
+    help="Sort files by method.",
 )
 @click.option(
     "--diff",
+    "cli_include_staged_git_diff",
     is_flag=True,
-    default=False,
-    help="Include staged Git diff (HEAD vs Index) if in a git repo.",
+    help="Include staged Git diff.",
 )
 @click.option(
     "--git-diff-branch",
+    "cli_diff_between_git_branches",
     nargs=2,
-    metavar="BASE_BRANCH COMPARE_BRANCH",
-    help="Include Git diff between two branches.",
+    metavar="BASE COMP",
+    help="Git diff between branches.",
 )
 @click.option(
     "--git-log-branch",
+    "cli_log_between_git_branches",
     nargs=2,
-    metavar="BASE_BRANCH COMPARE_BRANCH",
-    help="Include Git log between two branches.",
+    metavar="BASE COMP",
+    help="Git log between branches.",
 )
 @click.option(
     "-c",
     "--encoding",
+    "cli_token_counter_encoding",
     default="cl100k",
     show_default=True,
-    help="Tokenizer encoding for token count (e.g., cl100k, o200k, gpt2). See tiktoken docs.",
+    help="Tiktoken encoding for token count.",
 )
 @click.option(
     "--show-tokens",
-    "show_tokens_format_str",
-    type=click.Choice([f.value for f in TokenCountFormat], case_sensitive=False),
-    help="Show calculated token count on stderr (human or raw format). Requires a valid --encoding.",
+    "cli_display_token_count_format_str",
+    type=click.Choice([f.value for f in TokenCountFormat]),
+    help="Show token count on stderr.",
 )
-@click.option('-o', '--output', 'output_file_str', type=click.Path(dir_okay=False, writable=True, path_type=Path), help='Write output to file instead of stdout.')
+@click.option(
+    "-o",
+    "--output",
+    "cli_output_to_file_path_str",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    help="Write output to file.",
+)
 @click.option(
     "--clipboard",
+    "cli_copy_to_system_clipboard",
     is_flag=True,
-    default=False,
-    help="Copy output to system clipboard (prompt content only, not JSON structure).",
+    help="Copy prompt to clipboard.",
 )
-@click.option('--verbose', '-v', count=True, help='Increase verbosity (-v for INFO, -vv for DEBUG).')
+@click.option(
+    "--verbose",
+    "-v",
+    "cli_verbosity_level",
+    count=True,
+    help="Verbosity: -v INFO, -vv DEBUG.",
+)
 @click.version_option(
-    package_name="llmfiles"
-)  # Ensure package name matches pyproject.toml
-def main_cli(
-    input_paths_arg: Tuple[Path, ...],
-    read_from_stdin: bool,
-    nul_separated: bool,
-    include_patterns: Tuple[str, ...],
-    exclude_patterns: Tuple[str, ...],
-    include_priority: bool,
-    no_ignore: bool,
-    hidden: bool,
-    follow_symlinks: bool,
-    template_path: Optional[Path],
-    preset_template_str: Optional[str],
-    user_vars_list: Tuple[str, ...],
-    output_format: str,
-    line_numbers: bool,
-    no_codeblock: bool,
-    absolute_paths: bool,
-    sort_method_str: str,
-    diff: bool,
-    git_diff_branch: Optional[Tuple[str, str]],
-    git_log_branch: Optional[Tuple[str, str]],
-    encoding: str,
-    show_tokens_format_str: Optional[str],
-    output_file_str: Optional[Path],
-    clipboard: bool,
-    verbose: int,
-):
-    """
-    llmfiles: Generate LLM prompts from codebases, git info, and templates.
-
-    Provide file/directory paths as arguments or use --stdin to pipe them.
-    Example: find . -name '*.py' -print0 | llmfiles --stdin -0 -o prompt.txt
-    """
-    # --- Logging Setup ---
+    version=app_version, package_name="llmfiles", prog_name="llmfiles"
+)
+@click.pass_context
+def main_cli_group(ctx: click.Context, cli_verbosity_level: int, **kwargs: Any):
+    """llmfiles: Build LLM prompts from codebases, git info, and templates."""
     log_level = logging.WARNING
-    if verbose == 1:
+    if cli_verbosity_level == 1:
         log_level = logging.INFO
-    elif verbose >= 2:
+    elif cli_verbosity_level >= 2:
         log_level = logging.DEBUG
-    logging.getLogger("llmfiles").setLevel(
-        log_level
-    )  # Target specific logger if modules use getLogger(__name__)
-    # Set root logger level as well if needed, or configure handlers
-    logging.getLogger().setLevel(log_level)
-    logger.info(f"Log level set to {logging.getLevelName(log_level)}")
 
-    # --- Input Validation and Config Building ---
-    try:
-        if not input_paths_arg and not read_from_stdin:
-            raise click.UsageError(
-                "Error: Must provide input paths as arguments or use --stdin."
-            )
-        if nul_separated and not read_from_stdin:
-            raise click.UsageError("Error: -0/--null requires --stdin.")
-        if template_path and preset_template_str:
-            logger.warning(
-                "Both --template and --preset provided. Custom --template will be used."
-            )
-        if output_file_str and output_file_str.is_dir():
-            raise click.BadParameter(
-                f"Output path '{output_file_str}' is a directory.",
-                param_hint="--output",
-            )
-
-        user_vars: Dict[str, str] = {}
-        for var_item in user_vars_list:
-            if '=' not in var_item:
-                 raise click.BadParameter(f"Invalid format for --var '{var_item}'. Use key=value.", param_hint='--var')
-            key, value = var_item.split('=', 1)
-            user_vars[key.strip()] = value
-
-        output_format_enum = OutputFormat.from_string(output_format)
-        sort_method_enum = SortMethod.from_string(sort_method_str)
-        show_tokens_format_enum = (
-            TokenCountFormat.from_string(show_tokens_format_str)
-            if show_tokens_format_str
-            else None
+    app_logger = logging.getLogger("llmfiles")
+    if (
+        not app_logger.handlers
+    ):  # Setup logger only if not already configured (e.g. by tests)
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(
+            logging.Formatter("%(levelname)-8s [%(name)s] %(message)s")
         )
-        preset_template_enum = (
-            PresetTemplate.from_string(preset_template_str)
-            if preset_template_str
-            else None
-        )
+        app_logger.addHandler(handler)
+    app_logger.setLevel(log_level)
+    if cli_verbosity_level > 0:
+        logger.info(f"Log level set to: {logging.getLevelName(log_level)}")
 
-        if not output_format_enum:
-            raise click.BadParameter(
-                f"Invalid output format: {output_format}", param_hint="--output-format"
-            )
-        if not sort_method_enum:
-            raise click.BadParameter(
-                f"Invalid sort method: {sort_method_str}", param_hint="--sort"
-            )
-        if show_tokens_format_str and not show_tokens_format_enum:
-            raise click.BadParameter(
-                f"Invalid token format: {show_tokens_format_str}",
-                param_hint="--show-tokens",
-            )
-        if preset_template_str and not preset_template_enum:
-            raise click.BadParameter(
-                f"Invalid preset template: {preset_template_str}", param_hint="--preset"
-            )
+    if ctx.invoked_subcommand is None:  # Default action: generate prompt
+        logger.debug("No subcommand; running default prompt generation.")
+        try:
+            paths = list(kwargs.get("cli_input_paths") or [])
+            if not paths and not kwargs.get("cli_read_from_stdin"):
+                paths = [Path(".")]  # Default to current dir
 
-        config = PromptConfig(
-            input_paths=list(input_paths_arg),
-            read_from_stdin=read_from_stdin,
-            nul_separated=nul_separated,
-            include_patterns=list(include_patterns),
-            exclude_patterns=list(exclude_patterns),
-            include_priority=include_priority,
-            no_ignore=no_ignore,
-            hidden=hidden,
-            follow_symlinks=follow_symlinks,
-            template_path=template_path,
-            preset_template=preset_template_enum,
-            user_vars=user_vars,
-            output_format=output_format_enum,
-            line_numbers=line_numbers,
-            no_codeblock=no_codeblock,
-            absolute_paths=absolute_paths,
-            sort_method=sort_method_enum,
-            diff=diff,
-            git_diff_branch=git_diff_branch if git_diff_branch else None,
-            git_log_branch=git_log_branch if git_log_branch else None,
-            encoding=encoding,
-            show_tokens_format=show_tokens_format_enum,
-            output_file=output_file_str,
-            clipboard=clipboard,
-        )
+            user_vars: Dict[str, str] = {}
+            for var_str in kwargs.get("cli_user_template_variables_list", []):
+                if "=" not in var_str:
+                    raise click.BadParameter(
+                        f"Invalid --var '{var_str}'. Use KEY=VALUE.", param_hint="--var"
+                    )
+                k, v = var_str.split("=", 1)
+                user_vars[k.strip()] = v
 
-    except (SmartPromptBuilderError, ConfigError) as e:  # Catch specific config errors
-        logger.debug(
-            "Configuration error details:", exc_info=True
-        )  # Log traceback only in debug
-        click.echo(f"Configuration Error: {e}", err=True)
-        sys.exit(1)
-    except click.ClickException as e:
-        e.show()
-        sys.exit(e.exit_code)
-    except Exception as e:
-        logger.exception("Unexpected error during setup")
-        click.echo(f"An unexpected setup error occurred: {e}", err=True)
-        sys.exit(1)
-
-    # --- Run Generator ---
-    try:
-        logger.info("Initializing prompt generator...")
-        generator = PromptGenerator(config)
-        logger.info("Starting prompt generation...")
-        final_prompt_content = generator.generate()  # This is the rendered content
-        logger.info("Prompt generation complete.")
-
-        # --- Handle Output ---
-        is_json_output = config.output_format == OutputFormat.JSON
-        output_content = ""
-
-        if is_json_output:
-            # Create the final JSON structure
-            json_payload = {
-                "prompt": final_prompt_content,
-                "token_count": generator.token_count,
-                "encoding": config.encoding,
-                "config_summary": {
-                    "base_dir": str(config.base_dir),
-                    "num_files_included": len(generator.file_data),
-                    "output_mode": "json",
-                    "template_source": "custom"
-                    if config.template_path
-                    else (
-                        config.preset_template.value
-                        if config.preset_template
-                        else config.output_format.value
-                    ),
-                    "sort_method": config.sort_method.value,
-                    "git_diff_enabled": config.diff,
-                    "git_diff_branch_enabled": bool(config.git_diff_branch),
-                    "git_log_branch_enabled": bool(config.git_log_branch),
-                },
-            }
-            # Add token count only if calculated
-            if generator.token_count is None and config.show_tokens_format:
-                logger.warning(
-                    "Token count requested but not calculated (possibly due to error)."
+            config = PromptConfig(
+                input_paths=paths,
+                read_from_stdin=kwargs.get("cli_read_from_stdin", False),
+                nul_separated=kwargs.get("cli_nul_separated_stdin", False),
+                include_patterns=list(kwargs.get("cli_include_patterns", [])),
+                exclude_patterns=list(kwargs.get("cli_exclude_patterns", [])),
+                include_priority=kwargs.get("cli_force_include_over_exclude", False),
+                no_ignore=kwargs.get("cli_disable_gitignore", False),
+                hidden=kwargs.get("cli_include_hidden_files", False),
+                follow_symlinks=kwargs.get("cli_traverse_symlinks", False),
+                template_path=kwargs.get("cli_custom_template_path"),
+                preset_template=PresetTemplate.from_string(
+                    kwargs["cli_selected_preset_template_str"]
                 )
-            elif generator.token_count is not None:
-                json_payload["token_count"] = generator.token_count
-
-            try:
-                output_content = json.dumps(json_payload, indent=2)
-            except TypeError as e:
-                logger.error(f"Failed to serialize output to JSON: {e}")
-                # Fallback to just dumping the prompt content? Or raise error?
-                output_content = final_prompt_content  # Fallback to raw content
-                is_json_output = False  # Treat as non-json output now
-        else:
-            output_content = final_prompt_content
-
-        output_written_somewhere = False
-        if config.output_file:
-            write_to_file(config.output_file, output_content)
-            click.echo(f"Output written to: {config.output_file}", err=True)
-            output_written_somewhere = True
-
-        if config.clipboard:
-            # Always copy the raw prompt content, not the JSON structure
-            copy_to_clipboard(final_prompt_content)
-            output_written_somewhere = True  # Clipboard counts as output destination
-
-        if not output_written_somewhere:
-            # Default to stdout if no other output specified
-            write_to_stdout(output_content)
-
-        # Display token count to stderr if requested
-        if generator.token_count is not None and config.show_tokens_format:
-            count_str = str(generator.token_count)
-            if config.show_tokens_format == TokenCountFormat.HUMAN:
-                count_str = f"{generator.token_count:,}"  # Simple comma formatting
-            click.echo(f"Token count ({config.encoding}): {count_str}", err=True)
-        elif config.show_tokens_format and generator.token_count is None:
-            logger.warning("Token count requested but could not be calculated.")
-            click.echo(
-                f"Token count ({config.encoding}): calculation failed.", err=True
+                if kwargs.get("cli_selected_preset_template_str")
+                else None,
+                user_vars=user_vars,
+                output_format=OutputFormat.from_string(
+                    kwargs["cli_fallback_output_format_str"]
+                )
+                or OutputFormat.MARKDOWN,
+                line_numbers=kwargs.get("cli_show_line_numbers", False),
+                no_codeblock=kwargs.get("cli_disable_markdown_codeblocks", False),
+                absolute_paths=kwargs.get("cli_use_absolute_paths_in_output", False),
+                process_yaml_truncate_long_fields=kwargs.get(
+                    "cli_process_yaml_truncate_long_fields", False
+                ),
+                yaml_truncate_placeholder=kwargs.get(
+                    "cli_yaml_truncate_placeholder", DEFAULT_YAML_TRUNCATION_PLACEHOLDER
+                ),
+                yaml_truncate_content_max_len=kwargs.get(
+                    "cli_yaml_truncate_content_max_len",
+                    DEFAULT_YAML_TRUNCATE_CONTENT_MAX_LEN,
+                ),
+                sort_method=SortMethod.from_string(kwargs["cli_file_sort_method_str"])
+                or SortMethod.NAME_ASC,
+                diff=kwargs.get("cli_include_staged_git_diff", False),
+                git_diff_branch=kwargs.get("cli_diff_between_git_branches") or None,
+                git_log_branch=kwargs.get("cli_log_between_git_branches") or None,
+                encoding=kwargs.get("cli_token_counter_encoding", "cl100k"),
+                show_tokens_format=TokenCountFormat.from_string(
+                    kwargs["cli_display_token_count_format_str"]
+                )
+                if kwargs.get("cli_display_token_count_format_str")
+                else None,
+                output_file=kwargs.get("cli_output_to_file_path_str"),
+                clipboard=kwargs.get("cli_copy_to_system_clipboard", False),
             )
+            if config.process_yaml_truncate_long_fields and not PYYAML_AVAILABLE:
+                click.echo(
+                    "WARNING: YAML truncation requested (--yaml-truncate-long-fields) but PyYAML not installed. Skipping. "
+                    "Install with: pip install llmfiles[yaml_tools]",
+                    err=True,
+                )
+            _run_main_flow(config)
+        except (click.ClickException, ConfigError, SmartPromptBuilderError) as e:
+            logger.debug(
+                "CLI Error details:",
+                exc_info=True if log_level <= logging.DEBUG else False,
+            )
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        except Exception as e:
+            logger.critical("Unexpected CLI error.", exc_info=True)
+            click.echo(f"UNEXPECTED ERROR: {e}. Report this.", err=True)
+            sys.exit(1)
+    else:
+        logger.debug(f"Subcommand '{ctx.invoked_subcommand}' invoked.")
 
-    except SmartPromptBuilderError as e:
-        logger.debug("Generation or output error details:", exc_info=True)
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
-    except Exception as e:
-        logger.exception("Unexpected error during generation/output")
-        click.echo(f"An unexpected error occurred: {e}", err=True)
-        sys.exit(1)
+def main_cli_entrypoint():
+    """Main entry point for the CLI script."""
+    # If an extension system for *other* subcommands existed, it would be loaded here.
+    # For the integrated YAML feature, no separate extension loading is needed.
+    main_cli_group(prog_name="llmfiles")
 
 if __name__ == '__main__':
-    main_cli(prog_name="llmfiles")  # Provide prog_name for standalone execution
+    main_cli_entrypoint()

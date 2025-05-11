@@ -1,34 +1,30 @@
 # llmfiles/exceptions.py
-"""Custom exceptions for the application."""
+"""Custom exceptions for the llmfiles application."""
 
 class SmartPromptBuilderError(Exception):
-    """Base exception for this application."""
+    """Base exception for all llmfiles application errors."""
     pass
 
 class ConfigError(SmartPromptBuilderError):
-    """Configuration related errors."""
+    """Errors related to configuration validation or loading."""
     pass
 
 class DiscoveryError(SmartPromptBuilderError):
-    """File discovery related errors."""
-    pass
-
-class ProcessingError(SmartPromptBuilderError):
-    """File content processing errors."""
+    """Errors during file and directory discovery."""
     pass
 
 class GitError(SmartPromptBuilderError):
-    """Git command related errors."""
+    """Errors from Git command execution or repository issues."""
     pass
 
 class TemplateError(SmartPromptBuilderError):
-    """Template rendering errors."""
+    """Errors in template loading, compilation, or rendering."""
     pass
 
 class OutputError(SmartPromptBuilderError):
-    """Output related errors."""
+    """Errors during output operations (e.g., writing to file/clipboard)."""
     pass
 
 class TokenizerError(SmartPromptBuilderError):
-    """Tokenizer related errors."""
+    """Errors related to token counting or tokenizer interactions."""
     pass

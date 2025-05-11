@@ -5,389 +5,273 @@ import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-import pybars  # Using pybars3 wrapper
+import pybars  # type: ignore
 
 from .config import PromptConfig, OutputFormat, PresetTemplate
 from .exceptions import TemplateError
+from .util import get_language_hint
 
 logger = logging.getLogger(__name__)
 
-# Define constants for clarity
-TRIPLE_BACKTICK = "```"
-CDATA_START = "<![CDATA["
-CDATA_END = "]]>"
+TRIPLE_BACKTICK, CDATA_START, CDATA_END = "```", "<![CDATA[", "]]>"
 
-# --- Default/Preset Templates ---
-# Updated to use project_root_display_name
 DEFAULT_MARKDOWN_TEMPLATE = rf"""
-Project: {{{{ project_root_display_name }}}}
+Project Root: {{{{project_root_display_name}}}}
+(Full Path: {{{{project_root_path_absolute}}}})
 
 {{{{#if source_tree}}}}
-Source Tree:
+Project Structure:
 {TRIPLE_BACKTICK}text
-{{{{{{ source_tree }}}}}}
+{{{{source_tree}}}}
 {TRIPLE_BACKTICK}
 {{{{/if}}}}
 
 {{{{#if files}}}}
-Files:
+Files Content:
 {{{{#each files}}}}
-`{{{{ this.relative_path }}}}`:
-{{{{{{ this.content }}}}}}
-
+---
+File: {{{{this.relative_path}}}}
+{{{{#if this.extension}}}}Language Hint: {{{{this.extension}}}}{{{{/if}}}}
+Content:
+{{{{this.content}}}} {{!-- Processed content (line numbers, code blocks etc.) --}}
+---
 {{{{/each}}}}
 {{{{else}}}}
-(No files included based on filters)
+(No files included based on current filters or input.)
 {{{{/if}}}}
 
+{{!-- Git sections --}}
 {{{{#if git_diff}}}}
-Staged Git Diff (HEAD vs Index):
+Staged Git Diff:
 {TRIPLE_BACKTICK}diff
-{{{{{{ git_diff }}}}}}
+{{{{git_diff}}}}
 {TRIPLE_BACKTICK}
 {{{{/if}}}}
-
 {{{{#if git_diff_branches}}}}
-Git Diff ({{{{ git_diff_branch_base }}}}..{{{{ git_diff_branch_compare }}}}):
+Git Diff ({{{{git_diff_branch_base}}}}...{{{{git_diff_branch_compare}}}}):
 {TRIPLE_BACKTICK}diff
-{{{{{{ git_diff_branches }}}}}}
+{{{{git_diff_branches}}}}
 {TRIPLE_BACKTICK}
 {{{{/if}}}}
-
 {{{{#if git_log_branches}}}}
-Git Log ({{{{ git_log_branch_base }}}}..{{{{ git_log_branch_compare }}}}):
+Git Log ({{{{git_log_branch_base}}}}...{{{{git_log_branch_compare}}}}):
 {TRIPLE_BACKTICK}text
-{{{{{{ git_log_branches }}}}}}
+{{{{git_log_branches}}}}
 {TRIPLE_BACKTICK}
 {{{{/if}}}}
 
 {{{{#if user_vars}}}}
 User Variables:
+{TRIPLE_BACKTICK}text
 {{{{#each user_vars}}}}
-- {{{{ @key }}}}: {{{{ this }}}}
+- {{{{ @key }}}}: {{{{this}}}}
 {{{{/each}}}}
+{TRIPLE_BACKTICK}
 {{{{/if}}}}
 """
 
-# Updated to use project_root_display_name and project_root_path_absolute
 DEFAULT_XML_TEMPLATE = rf"""
-<prompt_data>
-    <project_name>{{{{ project_root_display_name }}}}</project_name>
-    <project_root_path_absolute>{{{{ project_root_path_absolute }}}}</project_root_path_absolute>
-
-    {{{{#if source_tree}}}}
-    <source_tree>{CDATA_START}
-{{{{{{ source_tree }}}}}}
-    {CDATA_END}</source_tree>
-    {{{{/if}}}}
-
-    <files>
-        {{{{#each files}}}}
-        <file path="{{{{ this.relative_path }}}}">
-            <content>{CDATA_START}
-{{{{{{ this.content }}}}}}
-            {CDATA_END}</content>
-            <raw_content>{CDATA_START}
-{{{{{{ this.raw_content }}}}}}
-            {CDATA_END}</raw_content>
+<llmfiles_context generated_at_utc="{{{{now}}}}">
+    <project name="{{{{project_root_display_name}}}}" absolute_path="{{{{project_root_path_absolute}}}}" />
+    {{{{#if source_tree}}}}<source_tree>{CDATA_START}{{{{source_tree}}}}{CDATA_END}</source_tree>{{{{/if}}}}
+    <files{{{{#unless files}}}} count="0" message="No files included."{{{{/unless}}}}>
+    {{{{#each files}}}}
+        <file relative_path="{{{{this.relative_path}}}}" extension="{{{{this.extension}}}}">
+            <content>{CDATA_START}{{{{this.content}}}}{CDATA_END}</content>
+            <raw_content>{CDATA_START}{{{{this.raw_content}}}}{CDATA_END}</raw_content>
         </file>
-        {{{{/each}}}}
-    </files>
-
-    {{{{#if git_diff}}}}
-    <git_diff type="staged">{CDATA_START}
-{{{{{{ git_diff }}}}}}
-    {CDATA_END}</git_diff>
-    {{{{/if}}}}
-
-    {{{{#if git_diff_branches}}}}
-    <git_diff type="branches" base="{{{{ git_diff_branch_base }}}}" compare="{{{{ git_diff_branch_compare }}}}">{CDATA_START}
-{{{{{{ git_diff_branches }}}}}}
-    {CDATA_END}</git_diff>
-    {{{{/if}}}}
-
-     {{{{#if git_log_branches}}}}
-    <git_log type="branches" base="{{{{ git_log_branch_base }}}}" compare="{{{{ git_log_branch_compare }}}}">{CDATA_START}
-{{{{{{ git_log_branches }}}}}}
-    {CDATA_END}</git_log>
-    {{{{/if}}}}
-
-    {{{{#if user_vars}}}}
-    <user_variables>
-    {{{{#each user_vars}}}}
-        <variable key="{{{{ @key }}}}">{{{{ this }}}}</variable>
     {{{{/each}}}}
-    </user_variables>
-    {{{{/if}}}}
-
-</prompt_data>
+    </files>
+    {{{{#if git_diff}}}}<git_info type="staged_diff">{CDATA_START}{{{{git_diff}}}}{CDATA_END}</git_info>{{{{/if}}}}
+    {{{{#if git_diff_branches}}}}<git_info type="branch_diff" base="{{{{git_diff_branch_base}}}}" compare="{{{{git_diff_branch_compare}}}}">{CDATA_START}{{{{git_diff_branches}}}}{CDATA_END}</git_info>{{{{/if}}}}
+    {{{{#if git_log_branches}}}}<git_info type="branch_log" base="{{{{git_log_branch_base}}}}" compare="{{{{git_log_branch_compare}}}}">{CDATA_START}{{{{git_log_branches}}}}{CDATA_END}</git_info>{{{{/if}}}}
+    {{{{#if user_vars}}}}<user_variables>
+    {{{{#each user_vars}}}}<variable key="{{{{@key}}}}">{CDATA_START}{{{{this}}}}{CDATA_END}</variable>{{{{/each}}}}
+    </user_variables>{{{{/if}}}}
+</llmfiles_context>
 """
 
-# (PRESET_CLAUDE_OPTIMAL_TEMPLATE remains the same as it defines its own document structure)
 PRESET_CLAUDE_OPTIMAL_TEMPLATE = rf"""
 <documents>
 {{{{#each files}}}}
 <document index="{{{{add @index 1}}}}">
-<source>{{{{this.relative_path}}}}</source>
-<document_content>{CDATA_START}
-{{{{{{this.raw_content}}}}}}
-{CDATA_END}</document_content>
+<source_filename>{{{{this.relative_path}}}}</source_filename>
+<document_content>{CDATA_START}{{{{this.raw_content}}}}{CDATA_END}</document_content>
 </document>
 {{{{/each}}}}
-
-{{{{#if source_tree}}}}
-<document index="{{{{claude_indices.source_tree_idx}}}}">
-<source>Project Structure ({{project_root_display_name}})</source>
-<document_content>{CDATA_START}
-{{{{{{source_tree}}}}}}
-{CDATA_END}</document_content>
-</document>
-{{{{/if}}}}
-
-{{{{#if git_diff}}}}
-<document index="{{{{claude_indices.git_diff_idx}}}}" type="staged_diff">
-<source>Staged Git Diff (HEAD vs Index) for {{project_root_display_name}}</source>
-<document_content>{CDATA_START}
-{{{{{{git_diff}}}}}}
-{CDATA_END}</document_content>
-</document>
-{{{{/if}}}}
-
-{{{{#if git_diff_branches}}}}
-<document index="{{{{claude_indices.git_diff_branches_idx}}}}" type="branch_diff" base="{{{{git_diff_branch_base}}}}" compare="{{{{git_diff_branch_compare}}}}">
-<source>Git Diff ({{{{git_diff_branch_base}}}}..{{{{git_diff_branch_compare}}}}) for {{project_root_display_name}}</source>
-<document_content>{CDATA_START}
-{{{{{{git_diff_branches}}}}}}
-{CDATA_END}</document_content>
-</document>
-{{{{/if}}}}
-
-{{{{#if git_log_branches}}}}
-<document index="{{{{claude_indices.git_log_branches_idx}}}}" type="branch_log" base="{{{{git_log_branch_base}}}}" compare="{{{{git_log_branch_compare}}}}">
-<source>Git Log ({{{{git_log_branch_base}}}}..{{{{git_log_branch_compare}}}}) for {{project_root_display_name}}</source>
-<document_content>{CDATA_START}
-{{{{{{git_log_branches}}}}}}
-{CDATA_END}</document_content>
-</document>
-{{{{/if}}}}
-
-{{{{#if user_vars}}}}
-<document index="{{{{claude_indices.user_vars_idx}}}}" type="user_variables">
-<source>User Variables for {{project_root_display_name}}</source>
-<document_content>{CDATA_START}
-{{{{#each user_vars}}}}
-{{{{@key}}}}: {{{{this}}}}
-{{{{/each}}}}
-{CDATA_END}</document_content>
-</document>
-{{{{/if}}}}
-
+{{{{#if source_tree}}}}<document index="{{{{claude_indices.source_tree_idx}}}}"><source_filename>Project Structure ({{{{project_root_display_name}}}})</source_filename><document_content>{CDATA_START}{{{{source_tree}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
+{{{{#if git_diff}}}}<document index="{{{{claude_indices.git_diff_idx}}}}"><source_filename>Staged Git Diff ({{{{project_root_display_name}}}})</source_filename><document_content>{CDATA_START}{{{{git_diff}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
+{{{{#if git_diff_branches}}}}<document index="{{{{claude_indices.git_diff_branches_idx}}}}"><source_filename>Git Diff ({{{{git_diff_branch_base}}}}...{{{{git_diff_branch_compare}}}}) for {{{{project_root_display_name}}}}</source_filename><document_content>{CDATA_START}{{{{git_diff_branches}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
+{{{{#if git_log_branches}}}}<document index="{{{{claude_indices.git_log_branches_idx}}}}"><source_filename>Git Log ({{{{git_log_branch_base}}}}...{{{{git_log_branch_compare}}}}) for {{{{project_root_display_name}}}}</source_filename><document_content>{CDATA_START}{{{{git_log_branches}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
+{{{{#if user_vars}}}}<document index="{{{{claude_indices.user_vars_idx}}}}"><source_filename>User Variables ({{{{project_root_display_name}}}})</source_filename><document_content>{CDATA_START}{{#each user_vars}}{{{{@key}}}}: {{{{this}}}}\n{{/each}}{CDATA_END}</document_content></document>{{{{/if}}}}
 </documents>
 """
 
 
-# --- Handlebars Helpers ---
-def _add_helper(_this, *args):
-    """Simple addition helper."""
-    numeric_args = [arg for arg in args if isinstance(arg, (int, float))]
-    return sum(numeric_args)
+def _add_helper(_this: Any, *args: Any) -> float:
+    return sum(a for a in args if isinstance(a, (int, float)))
 
 
-# --- Template Renderer Class ---
+def _now_utc_iso(_this: Any, *args: Any) -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
 class TemplateRenderer:
-    """Handles loading and rendering Handlebars templates."""
     def __init__(self, config: PromptConfig):
         self.config = config
-        self.handlebars = pybars.Compiler()
+        self.compiler = pybars.Compiler()
         self.helpers = {
             "add": _add_helper,
-            "now": lambda _this, *args: datetime.datetime.now().isoformat(),
+            "now": _now_utc_iso,
+            "get_lang_hint": lambda _t, e: get_language_hint(e),
         }
-        self.template_content = self._load_template()
+        self.source_id: str = "unknown"
+        self.raw_tpl_content: str = self._load_content()
         try:
-            self.template = self.handlebars.compile(self.template_content)
+            self.compiled_tpl = self.compiler.compile(self.raw_tpl_content)
         except Exception as e:
-            raise TemplateError(f"Failed to compile template: {e}")
+            raise TemplateError(f"Failed to compile template '{self.source_id}': {e}")
 
-    def _load_template(self) -> str:
-        """Loads template content based on config priority."""
+    def _load_content(self) -> str:
         if self.config.template_path:
-            logger.info(f"Loading custom template from: {self.config.template_path}")
+            self.source_id = f"file:{self.config.template_path}"
             try:
-                return self.config.template_path.read_text(encoding="utf-8")
+                return self.config.template_path.read_text("utf-8")
             except Exception as e:
-                raise TemplateError(
-                    f"Failed to read template file {self.config.template_path}: {e}"
-                )
-        elif self.config.preset_template:
-            logger.info(f"Using preset template: {self.config.preset_template.value}")
-            if self.config.preset_template == PresetTemplate.CLAUDE_OPTIMAL:
-                return PRESET_CLAUDE_OPTIMAL_TEMPLATE
-            elif self.config.preset_template == PresetTemplate.GENERIC_XML:
-                return DEFAULT_XML_TEMPLATE
-            elif self.config.preset_template == PresetTemplate.DEFAULT:
-                return DEFAULT_MARKDOWN_TEMPLATE
-            else:
-                logger.warning(
-                    f"Unknown preset template '{self.config.preset_template.value}', falling back to default markdown."
-                )
-                return DEFAULT_MARKDOWN_TEMPLATE
-        else:
-            logger.info(
-                f"Using default template for format: {self.config.output_format.value}"
+                raise TemplateError(f"Failed to read template {self.source_id}: {e}")
+        if self.config.preset_template:
+            self.source_id = f"preset:{self.config.preset_template.value}"
+            tpl_map = {
+                PresetTemplate.DEFAULT: DEFAULT_MARKDOWN_TEMPLATE,
+                PresetTemplate.CLAUDE_OPTIMAL: PRESET_CLAUDE_OPTIMAL_TEMPLATE,
+                PresetTemplate.GENERIC_XML: DEFAULT_XML_TEMPLATE,
+            }
+            if self.config.preset_template in tpl_map:
+                return tpl_map[self.config.preset_template]
+            logger.warning(
+                f"Unknown preset '{self.config.preset_template.value}', falling back."
             )
-            if self.config.output_format == OutputFormat.XML:
-                return DEFAULT_XML_TEMPLATE
-            return DEFAULT_MARKDOWN_TEMPLATE
+
+        self.source_id = f"default_fmt:{self.config.output_format.value}"
+        if self.config.output_format == OutputFormat.XML:
+            return DEFAULT_XML_TEMPLATE
+        if self.config.output_format == OutputFormat.JSON:
+            return "{{prompt_content}}"  # JSON structure built by CLI
+        return DEFAULT_MARKDOWN_TEMPLATE  # Default to Markdown
 
     def render(self, context: Dict[str, Any]) -> str:
-        """Renders the loaded template with the given context."""
-        logger.info("Rendering template...")
+        logger.info(f"Rendering template '{self.source_id}'...")
         try:
-            rendered = self.template(context, helpers=self.helpers)
-            logger.info("Template rendered successfully.")
-            return rendered.strip() + "\n"
+            rendered = self.compiled_tpl(context, helpers=self.helpers)
+            return rendered.strip() + "\n"  # Ensure single trailing newline
         except Exception as e:
-            logger.error(f"Template rendering error: {e}")
-            logger.error(f"Context keys available: {list(context.keys())}")
-            raise TemplateError(f"Failed to render template: {e}")
-
-
-# --- Tree Building ---
-def _build_tree_string(file_data: List[Dict[str, Any]], config: PromptConfig) -> str:
-    """Generates a text-based directory tree string."""
-    if not file_data:
-        return "(No files included)"
-
-    tree: Dict[str, Any] = {}
-    base_dir = config.base_dir
-    base_name = base_dir.name if base_dir and base_dir.name else str(base_dir)
-
-    for item in file_data:
-        try:
-            relative_path = Path(item.get("relative_path", ""))
-            if not relative_path.parts:
-                continue
-
-            parts = list(relative_path.parts)
-            current_level = tree
-            for i, part in enumerate(parts):
-                is_last_part = i == len(parts) - 1
-                if part not in current_level:
-                    current_level[part] = {
-                        "_type": "file" if is_last_part else "dir",
-                        "_children": {},
-                    }
-                if not is_last_part and current_level[part]["_type"] == "file":
-                    current_level[part]["_type"] = "dir"
-                if not is_last_part:
-                    if "_children" not in current_level[part]:
-                        current_level[part]["_children"] = {}
-                    current_level = current_level[part]["_children"]
-        except Exception as e:
-            logger.warning(
-                f"Error processing path for tree generation '{item.get('relative_path')}': {e}"
+            keys = list(context.keys())  # For easier debugging of context
+            logger.error(
+                f"Template render error for '{self.source_id}' with keys {keys}: {e}",
+                exc_info=True,
             )
-
-    def format_tree(
-        node: Dict[str, Any], indent: str = "", is_last_level: bool = True
-    ) -> List[str]:
-        lines = []
-        sorted_keys = sorted([k for k in node if not k.startswith("_")])
-
-        for i, key in enumerate(sorted_keys):
-            item = node[key]
-            is_current_item_last = i == len(sorted_keys) - 1
-            connector = "└── " if is_current_item_last else "├── "
-            lines.append(f"{indent}{connector}{key}")
-
-            if item["_type"] == "dir":
-                new_indent = indent + ("    " if is_current_item_last else "│   ")
-                lines.extend(
-                    format_tree(
-                        item.get("_children", {}), new_indent, is_current_item_last
-                    )
+            if isinstance(e, pybars.PybarsError) and "Missing" in str(e):
+                raise TemplateError(
+                    f"Render fail for '{self.source_id}': Variable missing/access error: {e}"
                 )
+            raise TemplateError(f"Render fail for '{self.source_id}': {e}")
+
+
+def _build_tree_string(file_data: List[Dict[str, Any]], config: PromptConfig) -> str:
+    if not file_data:
+        return "(No files included for tree.)"
+    tree_dict: Dict[str, Any] = {}
+    for entry in file_data:
+        rel_path_str = entry.get("relative_path")
+        if not rel_path_str:
+            continue
+        parts, current_level = Path(rel_path_str).parts, tree_dict
+        for i, part in enumerate(parts):
+            is_last = i == len(parts) - 1
+            node = current_level.setdefault(
+                part, {"_type": "file" if is_last else "dir", "_children": {}}
+            )
+            if not is_last and node["_type"] == "file":
+                node["_type"] = "dir"  # Promote to dir if has children
+            if not is_last:
+                current_level = node["_children"]
+
+    def format_recursive(node: Dict[str, Any], prefix: str = "") -> List[str]:
+        lines, sorted_keys = [], sorted(k for k in node if not k.startswith("_"))
+        for i, key in enumerate(sorted_keys):
+            item, is_last_item = node[key], (i == len(sorted_keys) - 1)
+            conn = "└── " if is_last_item else "├── "
+            lines.append(f"{prefix}{conn}{key}")
+            if item["_type"] == "dir" and item["_children"]:
+                new_prefix = prefix + ("    " if is_last_item else "│   ")
+                lines.extend(format_recursive(item["_children"], new_prefix))
         return lines
 
-    tree_lines = [base_name + "/"]
-    tree_lines.extend(format_tree(tree))
-    return "\n".join(tree_lines)
+    root_name = (
+        f"{config.base_dir.name}/" if config.base_dir.name else f"{config.base_dir}/"
+    )
+    return "\n".join([root_name] + format_recursive(tree_dict))
 
 
-# --- Context Building ---
 def build_template_context(
     config: PromptConfig,
-    file_data: List[Dict[str, Any]],
+    files: List[Dict[str, Any]],
     git_diff: Optional[str],
-    git_diff_branches_data: Optional[str],
-    git_log_branches_data: Optional[str],
+    git_diff_br: Optional[str],
+    git_log_br: Optional[str],
 ) -> Dict[str, Any]:
-    """Builds the context dictionary for Handlebars rendering."""
     logger.info("Building template context...")
-
-    if not config.base_dir or not config.base_dir.is_absolute():
+    if not (config.base_dir and config.base_dir.is_absolute()):
         raise TemplateError(
-            "Base directory is not configured or resolved for context building."
+            "Base directory not configured or not absolute for context."
         )
 
-    source_tree_str = _build_tree_string(file_data, config)
+    tree_str = _build_tree_string(files, config)
+    root_display_name = config.base_dir.name or str(config.base_dir)
 
-    project_display_name = (
-        config.base_dir.name
-        if config.base_dir and config.base_dir.name
-        else str(config.base_dir)
-    )
-
-    claude_indices = {}
+    claude_idx: Dict[str, int] = {}
     if config.preset_template == PresetTemplate.CLAUDE_OPTIMAL:
-        idx = len(file_data) + 1
-        has_tree = source_tree_str and source_tree_str != "(No files included)"
-        if has_tree:
-            claude_indices["source_tree_idx"] = idx
-            idx += 1
+        current = len(files) + 1
+        if tree_str and tree_str != "(No files included for tree.)":
+            claude_idx["source_tree_idx"] = current
+            current += 1
         if git_diff:
-            claude_indices["git_diff_idx"] = idx
-            idx += 1
-        if git_diff_branches_data:
-            claude_indices["git_diff_branches_idx"] = idx
-            idx += 1
-        if git_log_branches_data:
-            claude_indices["git_log_branches_idx"] = idx
-            idx += 1
+            claude_idx["git_diff_idx"] = current
+            current += 1
+        if git_diff_br:
+            claude_idx["git_diff_branches_idx"] = current
+            current += 1
+        if git_log_br:
+            claude_idx["git_log_branches_idx"] = current
+            current += 1
         if config.user_vars:
-            claude_indices["user_vars_idx"] = idx
+            claude_idx["user_vars_idx"] = current
 
-    context = {
-        "project_root_path_absolute": str(config.base_dir),  # Full absolute path
-        "project_root_display_name": project_display_name,  # Just the directory name
-        "source_tree": source_tree_str
-        if source_tree_str != "(No files included)"
+    raw_ctx = {
+        "project_root_path_absolute": str(config.base_dir),
+        "project_root_display_name": root_display_name,
+        "source_tree": tree_str
+        if tree_str != "(No files included for tree.)"
         else None,
-        "files": file_data,
-        "git_diff": git_diff,
-        "git_diff_branches": git_diff_branches_data,
-        "git_log_branches": git_log_branches_data,
-        "user_vars": config.user_vars if config.user_vars else None,
+        "files": files or None,  # Pass None if empty for cleaner {{#if files}}
+        "git_diff": git_diff or None,
+        "git_diff_branches": git_diff_br or None,
+        "git_log_branches": git_log_br or None,
+        "user_vars": config.user_vars or None,
+        "claude_indices": claude_idx or None,
         "git_diff_branch_base": config.git_diff_branch[0]
-        if config.git_diff_branch
+        if config.git_diff_branch and git_diff_br
         else None,
         "git_diff_branch_compare": config.git_diff_branch[1]
-        if config.git_diff_branch
+        if config.git_diff_branch and git_diff_br
         else None,
         "git_log_branch_base": config.git_log_branch[0]
-        if config.git_log_branch
+        if config.git_log_branch and git_log_br
         else None,
         "git_log_branch_compare": config.git_log_branch[1]
-        if config.git_log_branch
+        if config.git_log_branch and git_log_br
         else None,
-        "claude_indices": claude_indices if claude_indices else None,
     }
-
-    context = {
-        k: v
-        for k, v in context.items()
-        if v is not None and (not isinstance(v, (list, dict)) or v)
-    }
-    logger.debug("Template context built.")
-    return context
+    return {
+        k: v for k, v in raw_ctx.items() if v is not None
+    }  # Filter out None top-level keys

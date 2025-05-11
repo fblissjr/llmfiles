@@ -1,4 +1,5 @@
 # llmfiles/__init__.py
-# Optional: configure logging basic setup here if needed
-import logging
-logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
+# This file makes 'llmfiles' a Python package.
+
+# Central version definition for the package.
+__version__ = "0.3.0"
