@@ -1,280 +1,394 @@
 # llmfiles/discovery.py
-"""File discovery and filtering logic."""
+"""
+file discovery and filtering logic.
+handles walking directories, respecting .gitignore, and applying include/exclude patterns.
+"""
 import os
 import sys
-import logging
 from pathlib import Path
 from typing import Iterator, List, Optional, Set, Dict
 
-import pathspec  # type: ignore # For .gitignore and glob pattern matching
+import pathspec  # type: ignore # for .gitignore and glob pattern matching
+import structlog  # for structured logging
 
-from .config import PromptConfig
-from .exceptions import DiscoveryError
+from llmfiles.config import PromptConfig
+from llmfiles.exceptions import DiscoveryError
 
-logger = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)  # module-level logger
 
-def _read_gitignore(dir_path: Path) -> Optional[pathspec.PathSpec]:
-    """Reads and parses a .gitignore file from the specified directory."""
-    gitignore_file = dir_path / ".gitignore"
+
+def _read_gitignore_spec(directory_path: Path) -> Optional[pathspec.PathSpec]:
+    """reads and parses a .gitignore file in the given directory, returning a pathspec object."""
+    gitignore_file = directory_path / ".gitignore"
     if gitignore_file.is_file():
         try:
-            with gitignore_file.open("r", encoding="utf-8", errors="ignore") as f:
-                # GitWildMatchPattern handles standard .gitignore syntax.
-                return pathspec.PathSpec.from_lines(
-                    pathspec.patterns.GitWildMatchPattern, f
+            with gitignore_file.open("r", encoding="utf-8", errors="ignore") as f_obj:
+                # gitwildmatchpattern handles standard .gitignore syntax.
+                spec = pathspec.PathSpec.from_lines(
+                    pathspec.patterns.GitWildMatchPattern, f_obj
                 )
+                log.debug("loaded_gitignore", path=str(gitignore_file))
+                return spec
         except Exception as e:
-            logger.warning(f"Could not read/parse {gitignore_file}: {e}")
+            log.warning(
+                "failed_to_parse_gitignore", path=str(gitignore_file), error=str(e)
+            )
     return None
 
-def _build_pathspec(patterns: List[str]) -> Optional[pathspec.PathSpec]:
-    """Builds a PathSpec object from glob patterns."""
-    if not patterns:
+def _compile_glob_patterns_to_spec(
+    glob_patterns: List[str],
+) -> Optional[pathspec.PathSpec]:
+    """compiles a list of glob patterns into a pathspec object for efficient matching."""
+    if not glob_patterns:
         return None
     try:
+        # uses git-style wildcard matching for include/exclude patterns.
         return pathspec.PathSpec.from_lines(
-            pathspec.patterns.GitWildMatchPattern, patterns
+            pathspec.patterns.GitWildMatchPattern, glob_patterns
         )
-    except Exception as e:
-        raise DiscoveryError(f"Error building pathspec from patterns '{patterns}': {e}")
+    except Exception as e:  # pathspec can raise errors for invalid patterns.
+        raise DiscoveryError(
+            f"error compiling glob patterns: {glob_patterns}. details: {e}"
+        ) from e
 
-def _get_seed_paths(config: PromptConfig) -> Set[Path]:
-    """Resolves initial absolute paths from CLI args or stdin, populating config.resolved_input_paths."""
-    raw_paths: List[Path] = []
+def _determine_initial_seed_paths(config: PromptConfig) -> Set[Path]:
+    """
+    resolves and validates initial paths from cli arguments or stdin.
+    these paths are the starting points for discovery.
+    updates `config.resolved_input_paths` with absolute, existing paths.
+    """
+    raw_paths_from_user: List[Path] = []
     if config.read_from_stdin:
-        logger.info("Reading initial paths from stdin...")
+        log.info("reading_initial_paths_from_stdin")
         try:
-            content = (
+            # read bytes to handle nul-separation correctly.
+            stdin_content_bytes = (
                 sys.stdin.buffer.read()
                 if config.nul_separated
                 else sys.stdin.read().encode("utf-8")
             )
-            sep = b"\0" if config.nul_separated else b"\n"
-            for p_str_bytes in content.split(sep):
-                p_str = p_str_bytes.decode("utf-8", errors="replace").strip()
-                if p_str:
-                    raw_paths.append(Path(p_str))
+            path_separator = b"\0" if config.nul_separated else b"\n"
+            for path_str_bytes in stdin_content_bytes.split(path_separator):
+                path_str = path_str_bytes.decode("utf-8", errors="replace").strip()
+                if path_str:
+                    raw_paths_from_user.append(
+                        Path(path_str)
+                    )  # keep as potentially relative for now
+            log.debug("read_paths_from_stdin", count=len(raw_paths_from_user))
         except Exception as e:
-            raise DiscoveryError(f"Fatal error reading stdin: {e}")
+            raise DiscoveryError(f"fatal error reading paths from stdin: {e}") from e
     else:
-        raw_paths.extend(config.input_paths)
+        raw_paths_from_user.extend(config.input_paths)  # from cli arguments
 
-    resolved_seeds: Set[Path] = set()
-    for p_raw in raw_paths:
+    resolved_seed_paths: Set[Path] = set()
+    for raw_path in raw_paths_from_user:
         try:
-            resolved_seeds.add(
-                (p_raw if p_raw.is_absolute() else Path.cwd() / p_raw).resolve(
-                    strict=True
-                )
-            )
+            # resolve paths relative to cwd if not absolute, then get absolute path.
+            # `strict=true` ensures the path exists.
+            abs_path = raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
+            resolved_p = abs_path.resolve(strict=True)
+            resolved_seed_paths.add(resolved_p)
         except FileNotFoundError:
-            logger.warning(f"Initial path '{p_raw}' not found. Skipping.")
+            log.warning("initial_path_not_found", path=str(raw_path))
         except Exception as e:
-            logger.warning(f"Error resolving initial path '{p_raw}': {e}. Skipping.")
+            log.warning(
+                "error_resolving_initial_path", path=str(raw_path), error=str(e)
+            )
 
-    config.resolved_input_paths = sorted(list(resolved_seeds))  # Store for reference
-    return resolved_seeds
+    config.resolved_input_paths = sorted(
+        list(resolved_seed_paths)
+    )  # store for reference
+    if not resolved_seed_paths and raw_paths_from_user:
+        log.warning(
+            "no_valid_initial_paths_resolved", provided_count=len(raw_paths_from_user)
+        )
+    return resolved_seed_paths
 
 def discover_paths(config: PromptConfig) -> Iterator[Path]:
     """
-    Discovers and yields absolute file paths matching configuration criteria.
-    Handles .gitignore, include/exclude patterns, hidden files, and symlinks.
+    discovers and yields absolute file paths matching all criteria in `config`.
+    this is the main generator for finding files to include in the prompt.
     """
-    logger.info(
-        f"Starting path discovery. Base directory for filters: {config.base_dir}"
-    )
-    seed_paths = _get_seed_paths(config)
-    if not seed_paths:
-        logger.info("No valid seed paths for discovery.")
+    log.info("path_discovery_started", base_dir_for_filters=str(config.base_dir))
+
+    # determine starting points for discovery.
+    # `_determine_initial_seed_paths` also populates `config.resolved_input_paths`.
+    seed_paths_for_discovery = _determine_initial_seed_paths(config)
+    if not seed_paths_for_discovery:
+        log.info("no_valid_seed_paths_found_for_discovery")
         return
 
-    yielded_files: Set[Path] = set()
-    # visited_dirs for os.walk helps if follow_symlinks is true and cycles exist,
-    # or if multiple seed_paths point to overlapping directory structures.
-    visited_dirs_for_walk: Set[Path] = set()
+    # compile include/exclude patterns for efficient matching.
+    include_spec = _compile_glob_patterns_to_spec(config.include_patterns)
+    exclude_spec = _compile_glob_patterns_to_spec(config.exclude_patterns)
 
-    include_spec = _build_pathspec(config.include_patterns)
-    exclude_spec = _build_pathspec(config.exclude_patterns)
-    gitignore_cache: Dict[Path, Optional[pathspec.PathSpec]] = {}
+    # cache for .gitignore specs to avoid re-reading files.
+    gitignore_specs_cache: Dict[Path, Optional[pathspec.PathSpec]] = {}
+    # keep track of yielded files and walked directories to avoid duplicates/cycles.
+    yielded_absolute_files: Set[Path] = set()
+    visited_absolute_dirs_for_walk: Set[Path] = set()
 
-    # Process initial seed paths (can be files or directories)
-    path_queue: List[Path] = sorted(list(seed_paths))  # Process consistently
-    while path_queue:
-        current_seed_path = path_queue.pop(0)
+    # process each seed path; it can be a file or a directory.
+    # using a queue simulates a breadth-first approach for initial seeds if multiple are given.
+    processing_queue: List[Path] = sorted(list(seed_paths_for_discovery))
 
-        if current_seed_path.is_file():
-            if current_seed_path not in yielded_files:
-                path_rel_to_base = (
-                    current_seed_path.relative_to(config.base_dir)
-                    if current_seed_path.is_relative_to(config.base_dir)
-                    else current_seed_path.name
-                )  # Fallback for files outside base_dir
-                if _should_yield_item(
-                    current_seed_path,
-                    path_rel_to_base,
+    while processing_queue:
+        current_path_to_process = processing_queue.pop(0)  # get next path from queue
+
+        # if the seed path is a file, check it directly.
+        if current_path_to_process.is_file():
+            if current_path_to_process not in yielded_absolute_files:
+                # path for filtering rules must be relative to `config.base_dir`.
+                path_relative_to_base = (
+                    current_path_to_process.relative_to(config.base_dir)
+                    if current_path_to_process.is_relative_to(config.base_dir)
+                    else current_path_to_process.name
+                )  # fallback for files outside base_dir (use filename)
+
+                if _should_yield_path(
+                    current_path_to_process,
+                    path_relative_to_base,
                     config,
                     include_spec,
                     exclude_spec,
-                    gitignore_cache,
-                    False,
+                    gitignore_specs_cache,
+                    is_dir=False,
                 ):
-                    yield current_seed_path
-                    yielded_files.add(current_seed_path)
-            continue
+                    yield current_path_to_process
+                    yielded_absolute_files.add(current_path_to_process)
+            continue  # done with this file
 
-        # If it's a directory, initiate os.walk from here
-        if current_seed_path.is_dir():
+        # if the seed path is a directory, initiate `os.walk`.
+        if current_path_to_process.is_dir():
+            # avoid re-walking if this exact directory path was already processed (e.g. due to symlinks or overlapping seeds).
             if (
-                current_seed_path in visited_dirs_for_walk
+                current_path_to_process in visited_absolute_dirs_for_walk
                 and not config.follow_symlinks
             ):
-                continue  # Already walked this specific directory path
-            visited_dirs_for_walk.add(current_seed_path)
-            logger.debug(f"Walking directory: {current_seed_path}")
+                log.debug(
+                    "skipping_already_walked_dir", path=str(current_path_to_process)
+                )
+                continue
+            visited_absolute_dirs_for_walk.add(current_path_to_process)
 
-            for root_str, dirnames, filenames in os.walk(
-                current_seed_path,
-                topdown=True,
+            log.debug("walking_directory", path=str(current_path_to_process))
+
+            # `os.walk` recursively explores the directory tree.
+            for root_dir_str, subdir_names, file_names_in_root in os.walk(
+                current_path_to_process,
+                topdown=True,  # `topdown=true` allows pruning of `subdir_names` list.
                 followlinks=config.follow_symlinks,
-                onerror=lambda e: logger.warning(f"os.walk error: {e}"),
+                onerror=lambda err_obj: log.warning(
+                    "os_walk_error",
+                    path=getattr(err_obj, "filename", "unknown"),
+                    error=getattr(err_obj, "strerror", str(err_obj)),
+                ),
             ):
-                root_abs = Path(root_str).resolve()
+                current_walk_root_absolute = Path(root_dir_str).resolve()
 
-                # Prune directories from traversal
-                original_dirnames = list(dirnames)
-                dirnames[:] = []  # Clear for repopulation
-                for d_name in original_dirnames:
-                    dir_abs = (root_abs / d_name).resolve()
-                    path_rel_to_base = (
-                        dir_abs.relative_to(config.base_dir)
-                        if dir_abs.is_relative_to(config.base_dir)
-                        else dir_abs
-                    )  # Fallback if outside
-                    if _should_yield_item(
-                        dir_abs,
-                        path_rel_to_base,
+                # --- filter subdirectories to prune traversal ---
+                # iterate over a copy of `subdir_names` because we modify the original list in place.
+                surviving_subdir_names = []
+                for subdir_name in subdir_names:
+                    subdir_absolute_path = (
+                        current_walk_root_absolute / subdir_name
+                    ).resolve()
+                    # path for filtering rules is relative to `config.base_dir`.
+                    path_relative_to_base = (
+                        subdir_absolute_path.relative_to(config.base_dir)
+                        if subdir_absolute_path.is_relative_to(config.base_dir)
+                        else subdir_absolute_path
+                    )  # fallback if dir is outside base_dir hierarchy
+
+                    if _should_yield_path(
+                        subdir_absolute_path,
+                        path_relative_to_base,
                         config,
                         include_spec,
                         exclude_spec,
-                        gitignore_cache,
-                        True,
+                        gitignore_specs_cache,
+                        is_dir=True,
                     ):
-                        dirnames.append(d_name)
+                        surviving_subdir_names.append(
+                            subdir_name
+                        )  # keep this subdir for `os.walk` to descend into.
                     else:
-                        logger.debug(
-                            f"Pruning dir from walk: {dir_abs} (rel: {path_rel_to_base})"
+                        log.debug(
+                            "pruning_dir_from_walk",
+                            path=str(subdir_absolute_path),
+                            relative_to_base=str(path_relative_to_base),
                         )
+                subdir_names[:] = (
+                    surviving_subdir_names  # modify `os.walk`'s list in-place.
+                )
 
-                # Process files in current directory
-                for f_name in filenames:
-                    file_abs = (root_abs / f_name).resolve()
-                    if file_abs in yielded_files:
+                # --- process files in the current `current_walk_root_absolute` directory ---
+                for file_name in file_names_in_root:
+                    file_absolute_path = (
+                        current_walk_root_absolute / file_name
+                    ).resolve()
+                    if (
+                        file_absolute_path in yielded_absolute_files
+                    ):  # avoid yielding duplicates.
                         continue
-                    path_rel_to_base = (
-                        file_abs.relative_to(config.base_dir)
-                        if file_abs.is_relative_to(config.base_dir)
-                        else file_abs.name
-                    )
-                    if _should_yield_item(
-                        file_abs,
-                        path_rel_to_base,
+
+                    path_relative_to_base = (
+                        file_absolute_path.relative_to(config.base_dir)
+                        if file_absolute_path.is_relative_to(config.base_dir)
+                        else file_absolute_path.name
+                    )  # fallback for files outside base_dir.
+
+                    if _should_yield_path(
+                        file_absolute_path,
+                        path_relative_to_base,
                         config,
                         include_spec,
                         exclude_spec,
-                        gitignore_cache,
-                        False,
+                        gitignore_specs_cache,
+                        is_dir=False,
                     ):
-                        yield file_abs
-                        yielded_files.add(file_abs)
+                        yield file_absolute_path
+                        yielded_absolute_files.add(file_absolute_path)
 
-def _should_yield_item(
-    abs_path: Path,
-    path_rel_to_base: Path,
+        elif (
+            not current_path_to_process.exists()
+        ):  # should have been caught by `resolve(strict=true)` earlier.
+            log.warning(
+                "path_disappeared_during_discovery", path=str(current_path_to_process)
+            )
+
+
+def _should_yield_path(
+    absolute_path: Path,  # the absolute path of the item (file or directory).
+    path_relative_to_base: Path,  # path of the item relative to `config.base_dir`, used for glob/gitignore.
     config: PromptConfig,
     include_spec: Optional[pathspec.PathSpec],
     exclude_spec: Optional[pathspec.PathSpec],
     gitignore_cache: Dict[Path, Optional[pathspec.PathSpec]],
-    is_dir: bool,
+    is_dir: bool,  # true if `absolute_path` is a directory.
 ) -> bool:
-    """Determines if a file/directory should be yielded or traversed based on all filters."""
-
-    # 1. Hidden Check (uses path relative to base for consistent dot-part checking)
+    """
+    determines if a file should be yielded or a directory traversed, based on all filters.
+    order of checks: hidden -> gitignore -> exclude patterns -> include patterns.
+    """
+    # 1. hidden check: skip hidden items if not configured to include them.
+    #    a path part is hidden if it starts with '.' (but isn't just '.' or '..').
     if (
-        any(p.startswith(".") and p not in (".", "..") for p in path_rel_to_base.parts)
+        any(
+            p.startswith(".") and p not in (".", "..")
+            for p in path_relative_to_base.parts
+        )
         and not config.hidden
     ):
-        logger.debug(f"Filter [Hidden]: Skipping '{path_rel_to_base}'")
+        log.debug("filter_skip_hidden", path=str(path_relative_to_base))
         return False
 
-    # 2. Gitignore Check
+    # 2. gitignore check: skip if ignored by any relevant .gitignore file.
     if not config.no_ignore:
-        current_dir = abs_path.parent if not is_dir else abs_path
-        # Iterate upwards from item's directory to base_dir (or root if base_dir is not an ancestor)
-        while current_dir.is_dir() and (
-            current_dir == config.base_dir
-            or config.base_dir.is_relative_to(current_dir.parent)
-            or not abs_path.is_relative_to(config.base_dir)
-        ):
-            if current_dir not in gitignore_cache:
-                gitignore_cache[current_dir] = _read_gitignore(current_dir)
-            spec = gitignore_cache[current_dir]
-            if spec:
+        # check .gitignore files from the item's containing directory up to `config.base_dir`.
+        # (or filesystem root if `config.base_dir` is not an ancestor, which is an edge case).
+        dir_to_scan_for_gitignore = (
+            absolute_path.parent if not is_dir else absolute_path
+        )
+
+        # iterate upwards while `dir_to_scan_for_gitignore` is valid and within reasonable bounds.
+        while dir_to_scan_for_gitignore.is_dir() and (
+            dir_to_scan_for_gitignore == config.base_dir
+            or config.base_dir.is_relative_to(dir_to_scan_for_gitignore.parent)
+            or not absolute_path.is_relative_to(config.base_dir)
+        ):  # complex condition to define search scope
+            if (
+                dir_to_scan_for_gitignore not in gitignore_cache
+            ):  # cache .gitignore specs.
+                gitignore_cache[dir_to_scan_for_gitignore] = _read_gitignore_spec(
+                    dir_to_scan_for_gitignore
+                )
+
+            current_gitignore_spec = gitignore_cache[dir_to_scan_for_gitignore]
+            if current_gitignore_spec:
                 try:
-                    # Path for .gitignore matching is relative to the .gitignore's directory
-                    path_for_gitignore_match = abs_path.relative_to(current_dir)
-                    if spec.match_file(
-                        str(path_for_gitignore_match)
-                    ):  # Pathspec expects string
-                        logger.debug(
-                            f"Filter [Gitignore]: '{path_rel_to_base}' ignored by {current_dir / '.gitignore'}"
+                    # path for matching must be relative to the directory of the .gitignore file.
+                    path_for_spec_match = str(
+                        absolute_path.relative_to(dir_to_scan_for_gitignore)
+                    )
+                    if current_gitignore_spec.match_file(path_for_spec_match):
+                        log.debug(
+                            "filter_skip_gitignored",
+                            path=str(path_relative_to_base),
+                            matched_as=path_for_spec_match,
+                            gitignore_location=str(
+                                dir_to_scan_for_gitignore / ".gitignore"
+                            ),
                         )
                         return False
-                except ValueError:
-                    pass  # Path not relative to current gitignore dir (e.g. different drive on windows)
-            if current_dir == config.base_dir and abs_path.is_relative_to(
-                config.base_dir
+                except (
+                    ValueError
+                ):  # `absolute_path` is not relative to `dir_to_scan_for_gitignore`.
+                    log.debug(
+                        "path_not_relative_to_gitignore_dir_for_check",
+                        path=str(absolute_path),
+                        gitignore_dir=str(dir_to_scan_for_gitignore),
+                    )
+
+            # stop upward search if we've checked .gitignore in `config.base_dir` (and path is under it).
+            if (
+                dir_to_scan_for_gitignore == config.base_dir
+                and absolute_path.is_relative_to(config.base_dir)
             ):
-                break  # Checked base_dir's .gitignore
-            if current_dir.parent == current_dir:
-                break  # Filesystem root
-            current_dir = current_dir.parent
+                break
+            if (
+                dir_to_scan_for_gitignore.parent == dir_to_scan_for_gitignore
+            ):  # reached filesystem root.
+                break
+            dir_to_scan_for_gitignore = dir_to_scan_for_gitignore.parent
 
-    # 3. Exclude/Include Glob Patterns (uses path_rel_to_base)
-    path_str_for_glob = str(path_rel_to_base)
+    # 3. glob exclude/include pattern checks (using `path_relative_to_base`).
+    path_str_for_glob_match = str(path_relative_to_base)
 
-    # Check Excludes: If excluded, it's out unless include_priority saves it.
-    if exclude_spec and exclude_spec.match_file(path_str_for_glob):
+    # check exclude patterns first.
+    if exclude_spec and exclude_spec.match_file(path_str_for_glob_match):
+        # if it matches an exclude pattern, it's out unless `include_priority` saves it.
         if (
             config.include_priority
             and include_spec
-            and include_spec.match_file(path_str_for_glob)
+            and include_spec.match_file(path_str_for_glob_match)
         ):
-            logger.debug(
-                f"Filter [Glob Prio]: '{path_str_for_glob}' incld by priority despite exclude."
-            )
-            # Falls through to standard include logic for files, dirs are traversed
+            log.debug("filter_glob_priority_include", path=str(path_relative_to_base))
+            # it's not excluded due to priority; proceed to final include check (which it just passed).
         else:
-            logger.debug(f"Filter [Glob Exclude]: '{path_str_for_glob}' excluded.")
-            return False
+            log.debug("filter_glob_exclude", path=str(path_relative_to_base))
+            return False  # definitely excluded.
 
-    # Check Includes:
+    # check include patterns.
     if include_spec:
-        # For FILES: must match an include pattern if --include is used.
-        if not is_dir and not include_spec.match_file(path_str_for_glob):
-            logger.debug(
-                f"Filter [Glob Include]: File '{path_str_for_glob}' doesn't match include. Skipping."
+        # for FILES: if --include patterns are given, the file *must* match one.
+        if not is_dir:
+            if not include_spec.match_file(path_str_for_glob_match):
+                log.debug(
+                    "filter_glob_no_include_match_file", path=str(path_relative_to_base)
+                )
+                return False
+            log.debug("filter_glob_include_match_file", path=str(path_relative_to_base))
+            return True  # file matched include, wasn't excluded (or saved by priority).
+        else:  # for DIRECTORIES:
+            # if include patterns exist, we don't strictly require the directory name itself
+            # to match file-centric patterns (e.g., `**/*.py`). the directory is allowed
+            # for traversal so files *within* it can be checked against include patterns.
+            # an include pattern *could* explicitly match a directory (e.g., `src/`, `**/tests/`).
+            # `pathspec.match_file` on `path_str_for_glob_match` (relative dir path) handles this.
+            # if `include_spec.match_file` is false for a dir, it might be because includes are file-only.
+            # in this case, we still traverse. if an include *was* dir-specific and didn't match,
+            # then `include_spec.match_file` would be false, but our permissive stance here for dirs means
+            # we rely on `exclude_spec` or gitignore to prune unwanted directory trees.
+            # this ensures `llmfiles . --include **/*.py` explores all non-excluded subdirs.
+            log.debug(
+                "filter_glob_include_dir_traversal_allowed",
+                path=str(path_relative_to_base),
             )
-            return False
-        # For DIRECTORIES: if include_spec exists, we allow traversal.
-        # Files *within* will be tested. This ensures `**/*.py` enters subdirs.
-        # If an include pattern specifically targets this directory (e.g. `src/`), pathspec would match it.
-        # If include patterns are only for files (e.g. `*.py`), pathspec won't match the dir name,
-        # but we still need to traverse it. So, for dirs, this check effectively passes if not excluded earlier.
-        if is_dir:
-            logger.debug(
-                f"Filter [Glob Include]: Dir '{path_str_for_glob}' allowed for traversal to check contents."
-            )
-
-    # If no include_spec, or if it's a file that matched, or a dir allowed for traversal.
-    logger.debug(f"Filter [Passed]: '{path_str_for_glob}' (is_dir={is_dir})")
-    return True
+            return True  # allow directory for traversal.
+    else:  # no include_spec (no --include patterns were provided).
+        # if it passed hidden, gitignore, and exclude checks, it's included.
+        log.debug(
+            "filter_glob_no_include_spec_item_included", path=str(path_relative_to_base)
+        )
+        return True

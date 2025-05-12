@@ -1,67 +1,79 @@
 # llmfiles/templating.py
-"""Handlebars templating logic."""
-import logging
+"""
+handles handlebars templating for generating the final prompt output.
+loads templates from files or uses built-in presets, compiles them,
+and renders them with context from discovered files and git information.
+"""
 import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-import pybars  # type: ignore
+import pybars  # type: ignore # handlebars templating engine
+import structlog  # for structured logging
 
-from .config import PromptConfig, OutputFormat, PresetTemplate
-from .exceptions import TemplateError
-from .util import get_language_hint
+from llmfiles.config import PromptConfig, OutputFormat, PresetTemplate
+from llmfiles.exceptions import TemplateError
+from llmfiles.util import get_language_hint  # for language hints in default templates
 
-logger = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)  # module-level logger
 
-TRIPLE_BACKTICK, CDATA_START, CDATA_END = "```", "<![CDATA[", "]]>"
+# --- constants for common template elements ---
+TRIPLE_BACKTICK = "```"
+CDATA_START = "<![CDATA["
+CDATA_END = "]]>"
 
+# --- default/preset template strings ---
+# these are raw handlebars templates.
+# default markdown template: general-purpose, suitable for many llms.
 DEFAULT_MARKDOWN_TEMPLATE = rf"""
-Project Root: {{{{project_root_display_name}}}}
-(Full Path: {{{{project_root_path_absolute}}}})
+project root: {{{{project_root_display_name}}}}
+(full path: {{{{project_root_path_absolute}}}})
 
 {{{{#if source_tree}}}}
-Project Structure:
+project structure:
 {TRIPLE_BACKTICK}text
 {{{{source_tree}}}}
 {TRIPLE_BACKTICK}
 {{{{/if}}}}
 
 {{{{#if files}}}}
-Files Content:
+files content:
 {{{{#each files}}}}
 ---
-File: {{{{this.relative_path}}}}
-{{{{#if this.extension}}}}Language Hint: {{{{this.extension}}}}{{{{/if}}}}
-Content:
-{{{{this.content}}}} {{!-- Processed content (line numbers, code blocks etc.) --}}
+file: {{{{this.relative_path}}}}
+{{{{#if this.extension}}}}language hint: {{{{this.extension}}}}{{{{/if}}}}
+content:
+{{{{this.content}}}} {{!-- this.content is processed (line numbers, code blocks per config) --}}
 ---
 {{{{/each}}}}
 {{{{else}}}}
-(No files included based on current filters or input.)
+(no files included based on current filters or input.)
 {{{{/if}}}}
 
-{{!-- Git sections --}}
+{{!-- git information sections, only shown if data exists --}}
 {{{{#if git_diff}}}}
-Staged Git Diff:
+staged git diff:
 {TRIPLE_BACKTICK}diff
 {{{{git_diff}}}}
 {TRIPLE_BACKTICK}
 {{{{/if}}}}
+
 {{{{#if git_diff_branches}}}}
-Git Diff ({{{{git_diff_branch_base}}}}...{{{{git_diff_branch_compare}}}}):
+git diff ({{{{git_diff_branch_base}}}}...{{{{git_diff_branch_compare}}}}):
 {TRIPLE_BACKTICK}diff
 {{{{git_diff_branches}}}}
 {TRIPLE_BACKTICK}
 {{{{/if}}}}
+
 {{{{#if git_log_branches}}}}
-Git Log ({{{{git_log_branch_base}}}}...{{{{git_log_branch_compare}}}}):
+git log ({{{{git_log_branch_base}}}}...{{{{git_log_branch_compare}}}}):
 {TRIPLE_BACKTICK}text
 {{{{git_log_branches}}}}
 {TRIPLE_BACKTICK}
 {{{{/if}}}}
 
 {{{{#if user_vars}}}}
-User Variables:
+user variables:
 {TRIPLE_BACKTICK}text
 {{{{#each user_vars}}}}
 - {{{{ @key }}}}: {{{{this}}}}
@@ -70,14 +82,15 @@ User Variables:
 {{{{/if}}}}
 """
 
+# default xml template: a generic xml structure.
 DEFAULT_XML_TEMPLATE = rf"""
 <llmfiles_context generated_at_utc="{{{{now}}}}">
-    <project name="{{{{project_root_display_name}}}}" absolute_path="{{{{project_root_path_absolute}}}}" />
+    <project name="{CDATA_START}{{{{project_root_display_name}}}}{CDATA_END}" absolute_path="{CDATA_START}{{{{project_root_path_absolute}}}}{CDATA_END}" />
     {{{{#if source_tree}}}}<source_tree>{CDATA_START}{{{{source_tree}}}}{CDATA_END}</source_tree>{{{{/if}}}}
-    <files{{{{#unless files}}}} count="0" message="No files included."{{{{/unless}}}}>
+    <files{{{{#unless files}}}} count="0" message="no files were included."{{{{/unless}}}}>
     {{{{#each files}}}}
         <file relative_path="{{{{this.relative_path}}}}" extension="{{{{this.extension}}}}">
-            <content>{CDATA_START}{{{{this.content}}}}{CDATA_END}</content>
+            <processed_content>{CDATA_START}{{{{this.content}}}}{CDATA_END}</processed_content>
             <raw_content>{CDATA_START}{{{{this.raw_content}}}}{CDATA_END}</raw_content>
         </file>
     {{{{/each}}}}
@@ -91,6 +104,7 @@ DEFAULT_XML_TEMPLATE = rf"""
 </llmfiles_context>
 """
 
+# preset template for anthropic claude models. uses `raw_content`.
 PRESET_CLAUDE_OPTIMAL_TEMPLATE = rf"""
 <documents>
 {{{{#each files}}}}
@@ -99,179 +113,273 @@ PRESET_CLAUDE_OPTIMAL_TEMPLATE = rf"""
 <document_content>{CDATA_START}{{{{this.raw_content}}}}{CDATA_END}</document_content>
 </document>
 {{{{/each}}}}
-{{{{#if source_tree}}}}<document index="{{{{claude_indices.source_tree_idx}}}}"><source_filename>Project Structure ({{{{project_root_display_name}}}})</source_filename><document_content>{CDATA_START}{{{{source_tree}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
-{{{{#if git_diff}}}}<document index="{{{{claude_indices.git_diff_idx}}}}"><source_filename>Staged Git Diff ({{{{project_root_display_name}}}})</source_filename><document_content>{CDATA_START}{{{{git_diff}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
-{{{{#if git_diff_branches}}}}<document index="{{{{claude_indices.git_diff_branches_idx}}}}"><source_filename>Git Diff ({{{{git_diff_branch_base}}}}...{{{{git_diff_branch_compare}}}}) for {{{{project_root_display_name}}}}</source_filename><document_content>{CDATA_START}{{{{git_diff_branches}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
-{{{{#if git_log_branches}}}}<document index="{{{{claude_indices.git_log_branches_idx}}}}"><source_filename>Git Log ({{{{git_log_branch_base}}}}...{{{{git_log_branch_compare}}}}) for {{{{project_root_display_name}}}}</source_filename><document_content>{CDATA_START}{{{{git_log_branches}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
-{{{{#if user_vars}}}}<document index="{{{{claude_indices.user_vars_idx}}}}"><source_filename>User Variables ({{{{project_root_display_name}}}})</source_filename><document_content>{CDATA_START}{{#each user_vars}}{{{{@key}}}}: {{{{this}}}}\n{{/each}}{CDATA_END}</document_content></document>{{{{/if}}}}
+{{{{#if source_tree}}}}<document index="{{{{claude_indices.source_tree_idx}}}}"><source_filename>project structure ({{{{project_root_display_name}}}})</source_filename><document_content>{CDATA_START}{{{{source_tree}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
+{{{{#if git_diff}}}}<document index="{{{{claude_indices.git_diff_idx}}}}"><source_filename>staged git diff ({{{{project_root_display_name}}}})</source_filename><document_content>{CDATA_START}{{{{git_diff}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
+{{{{#if git_diff_branches}}}}<document index="{{{{claude_indices.git_diff_branches_idx}}}}"><source_filename>git diff ({{{{git_diff_branch_base}}}}...{{{{git_diff_branch_compare}}}}) for {{{{project_root_display_name}}}}</source_filename><document_content>{CDATA_START}{{{{git_diff_branches}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
+{{{{#if git_log_branches}}}}<document index="{{{{claude_indices.git_log_branches_idx}}}}"><source_filename>git log ({{{{git_log_branch_base}}}}...{{{{git_log_branch_compare}}}}) for {{{{project_root_display_name}}}}</source_filename><document_content>{CDATA_START}{{{{git_log_branches}}}}{CDATA_END}</document_content></document>{{{{/if}}}}
+{{{{#if user_vars}}}}<document index="{{{{claude_indices.user_vars_idx}}}}"><source_filename>user defined variables ({{{{project_root_display_name}}}})</source_filename><document_content>{CDATA_START}{{#each user_vars}}{{{{@key}}}}: {{{{this}}}}\n{{/each}}{CDATA_END}</document_content></document>{{{{/if}}}}
 </documents>
 """
 
+# --- handlebars helper functions ---
+def _add_helper_for_pybars(_this_context: Any, *args: Any) -> float:
+    """pybars helper to sum numeric arguments. non-numeric args are ignored."""
+    return sum(num_arg for num_arg in args if isinstance(num_arg, (int, float)))
 
-def _add_helper(_this: Any, *args: Any) -> float:
-    return sum(a for a in args if isinstance(a, (int, float)))
-
-
-def _now_utc_iso(_this: Any, *args: Any) -> str:
+def _now_utc_iso_helper_for_pybars(_this_context: Any, *args: Any) -> str:
+    """pybars helper to output the current timestamp in iso 8601 format (utc)."""
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-
 class TemplateRenderer:
+    """manages loading, compilation, and rendering of handlebars templates."""
     def __init__(self, config: PromptConfig):
         self.config = config
-        self.compiler = pybars.Compiler()
-        self.helpers = {
-            "add": _add_helper,
-            "now": _now_utc_iso,
-            "get_lang_hint": lambda _t, e: get_language_hint(e),
+        self.handlebars_compiler = pybars.Compiler()  # handlebars compiler instance
+        self.registered_helpers = {  # helpers available within templates
+            "add": _add_helper_for_pybars,
+            "now": _now_utc_iso_helper_for_pybars,
+            "get_lang_hint": lambda _this, ext_str: get_language_hint(ext_str),
         }
-        self.source_id: str = "unknown"
-        self.raw_tpl_content: str = self._load_content()
-        try:
-            self.compiled_tpl = self.compiler.compile(self.raw_tpl_content)
-        except Exception as e:
-            raise TemplateError(f"Failed to compile template '{self.source_id}': {e}")
+        self.template_source_name: str = "unknown_source"  # for logging/error messages
+        self.raw_template_string: str = self._determine_and_load_template_string()
 
-    def _load_content(self) -> str:
-        if self.config.template_path:
-            self.source_id = f"file:{self.config.template_path}"
+        try:  # compile the template string for efficient re-use.
+            self.compiled_template_function = self.handlebars_compiler.compile(
+                self.raw_template_string
+            )
+        except (
+            Exception
+        ) as e:  # pybars can raise various errors for invalid template syntax.
+            raise TemplateError(
+                f"failed to compile template from '{self.template_source_name}': {e}"
+            ) from e
+
+    def _determine_and_load_template_string(self) -> str:
+        """
+        loads template string based on config priority: custom file > preset > default format.
+        also sets `self.template_source_name` for context in logs/errors.
+        """
+        if (
+            self.config.template_path
+        ):  # highest priority: user-provided custom template file.
+            self.template_source_name = f"custom_file:{self.config.template_path}"
+            log.info("loading_custom_template", path=str(self.config.template_path))
             try:
-                return self.config.template_path.read_text("utf-8")
+                return self.config.template_path.read_text(encoding="utf-8")
             except Exception as e:
-                raise TemplateError(f"Failed to read template {self.source_id}: {e}")
-        if self.config.preset_template:
-            self.source_id = f"preset:{self.config.preset_template.value}"
-            tpl_map = {
+                raise TemplateError(
+                    f"failed to read template file {self.config.template_path}: {e}"
+                ) from e
+
+        if self.config.preset_template:  # next priority: built-in preset template.
+            self.template_source_name = f"preset:{self.config.preset_template.value}"
+            log.info(
+                "using_preset_template", preset_name=self.config.preset_template.value
+            )
+            preset_map = {
                 PresetTemplate.DEFAULT: DEFAULT_MARKDOWN_TEMPLATE,
                 PresetTemplate.CLAUDE_OPTIMAL: PRESET_CLAUDE_OPTIMAL_TEMPLATE,
                 PresetTemplate.GENERIC_XML: DEFAULT_XML_TEMPLATE,
             }
-            if self.config.preset_template in tpl_map:
-                return tpl_map[self.config.preset_template]
-            logger.warning(
-                f"Unknown preset '{self.config.preset_template.value}', falling back."
+            if self.config.preset_template in preset_map:
+                return preset_map[self.config.preset_template]
+            log.warning(
+                "unknown_preset_template_fallback",
+                preset=self.config.preset_template.value,
             )
+            # if unknown preset, fall through to default format based template.
 
-        self.source_id = f"default_fmt:{self.config.output_format.value}"
+        # fallback: default template based on `config.output_format`.
+        self.template_source_name = f"default_format:{self.config.output_format.value}"
+        log.info(
+            "using_default_template_for_format", format=self.config.output_format.value
+        )
         if self.config.output_format == OutputFormat.XML:
             return DEFAULT_XML_TEMPLATE
         if self.config.output_format == OutputFormat.JSON:
-            return "{{prompt_content}}"  # JSON structure built by CLI
-        return DEFAULT_MARKDOWN_TEMPLATE  # Default to Markdown
+            # json output structure is handled by cli.py, not a handlebars template for the entire json.
+            # this is a placeholder if direct rendering of a "json prompt part" were needed.
+            return "{{prompt_content_for_json_field}}"  # expecting 'prompt_content_for_json_field' in context
+        return DEFAULT_MARKDOWN_TEMPLATE  # default to markdown.
 
-    def render(self, context: Dict[str, Any]) -> str:
-        logger.info(f"Rendering template '{self.source_id}'...")
+    def render(self, template_context_data: Dict[str, Any]) -> str:
+        """renders the compiled template with the given context data."""
+        log.info("rendering_template", source=self.template_source_name)
         try:
-            rendered = self.compiled_tpl(context, helpers=self.helpers)
-            return rendered.strip() + "\n"  # Ensure single trailing newline
-        except Exception as e:
-            keys = list(context.keys())  # For easier debugging of context
-            logger.error(
-                f"Template render error for '{self.source_id}' with keys {keys}: {e}",
+            rendered_string = self.compiled_template_function(
+                template_context_data, helpers=self.registered_helpers
+            )
+            log.debug(
+                "template_rendered_successfully", source=self.template_source_name
+            )
+            return (
+                rendered_string.strip() + "\n"
+            )  # ensure single trailing newline for consistency.
+        except Exception as e:  # pybars can raise errors if context variables are missing or helpers fail.
+            log.error(
+                "template_rendering_error",
+                source=self.template_source_name,
+                context_keys=list(template_context_data.keys()),
+                error=str(e),
                 exc_info=True,
             )
-            if isinstance(e, pybars.PybarsError) and "Missing" in str(e):
+            if (
+                isinstance(e, pybars.PybarsError) and "missing" in str(e).lower()
+            ):  # more specific error for missing vars
                 raise TemplateError(
-                    f"Render fail for '{self.source_id}': Variable missing/access error: {e}"
-                )
-            raise TemplateError(f"Render fail for '{self.source_id}': {e}")
+                    f"render fail for '{self.template_source_name}': variable missing or access error: {e}"
+                ) from e
+            raise TemplateError(
+                f"render fail for '{self.template_source_name}': {e}"
+            ) from e
 
 
-def _build_tree_string(file_data: List[Dict[str, Any]], config: PromptConfig) -> str:
-    if not file_data:
-        return "(No files included for tree.)"
-    tree_dict: Dict[str, Any] = {}
-    for entry in file_data:
-        rel_path_str = entry.get("relative_path")
-        if not rel_path_str:
-            continue
-        parts, current_level = Path(rel_path_str).parts, tree_dict
-        for i, part in enumerate(parts):
-            is_last = i == len(parts) - 1
-            node = current_level.setdefault(
-                part, {"_type": "file" if is_last else "dir", "_children": {}}
+# --- directory tree building logic ---
+def _build_tree_string(file_entries: List[Dict[str, Any]], config: PromptConfig) -> str:
+    """generates a text-based directory tree string from `file_entries`."""
+    if not file_entries:
+        return "(no files included for tree.)"
+
+    # tree_structure is a nested dict: `name -> {'_type': 'file'/'dir', '_children': {}}`
+    tree_structure: Dict[str, Any] = {}
+    for entry_dict in file_entries:
+        relative_path_str = entry_dict.get("relative_path")
+        if not relative_path_str:
+            log.warning(
+                "skipping_file_entry_no_relative_path_for_tree", entry=entry_dict
             )
-            if not is_last and node["_type"] == "file":
-                node["_type"] = "dir"  # Promote to dir if has children
-            if not is_last:
-                current_level = node["_children"]
+            continue
 
-    def format_recursive(node: Dict[str, Any], prefix: str = "") -> List[str]:
-        lines, sorted_keys = [], sorted(k for k in node if not k.startswith("_"))
-        for i, key in enumerate(sorted_keys):
-            item, is_last_item = node[key], (i == len(sorted_keys) - 1)
-            conn = "└── " if is_last_item else "├── "
-            lines.append(f"{prefix}{conn}{key}")
-            if item["_type"] == "dir" and item["_children"]:
-                new_prefix = prefix + ("    " if is_last_item else "│   ")
-                lines.extend(format_recursive(item["_children"], new_prefix))
-        return lines
+        path_parts = Path(relative_path_str).parts
+        current_dict_level = tree_structure
+        for i, part_name in enumerate(path_parts):
+            is_last_part = (
+                i == len(path_parts) - 1
+            )  # is this part a file or a dir segment?
+            node_data = current_dict_level.setdefault(
+                part_name, {"_type": "file" if is_last_part else "dir", "_children": {}}
+            )
+            # if a path segment was first assumed to be a file but later found to be a directory.
+            if not is_last_part and node_data["_type"] == "file":
+                node_data["_type"] = "dir"
+            if not is_last_part:
+                current_dict_level = node_data["_children"]  # descend into children
 
-    root_name = (
+    # recursive helper to format the `tree_structure` dict into display lines.
+    def format_tree_node_recursively(
+        node_dict_level: Dict[str, Any], indent_str: str = ""
+    ) -> List[str]:
+        output_lines: List[str] = []
+        # sort items by name for consistent tree display.
+        sorted_item_names = sorted(
+            [name for name in node_dict_level if not name.startswith("_")]
+        )  # ignore internal keys
+
+        for i, item_name in enumerate(sorted_item_names):
+            item_data = node_dict_level[item_name]
+            is_last_item_at_this_level = i == len(sorted_item_names) - 1
+            connector_str = "└── " if is_last_item_at_this_level else "├── "
+            output_lines.append(f"{indent_str}{connector_str}{item_name}")
+
+            if (
+                item_data["_type"] == "dir" and item_data["_children"]
+            ):  # if it's a dir with children, recurse.
+                new_indent_str = indent_str + (
+                    "    " if is_last_item_at_this_level else "│   "
+                )
+                output_lines.extend(
+                    format_tree_node_recursively(item_data["_children"], new_indent_str)
+                )
+        return output_lines
+
+    # determine the root name for the tree display.
+    tree_root_display_name = (
         f"{config.base_dir.name}/" if config.base_dir.name else f"{config.base_dir}/"
     )
-    return "\n".join([root_name] + format_recursive(tree_dict))
 
+    final_tree_lines = [tree_root_display_name]
+    final_tree_lines.extend(format_tree_node_recursively(tree_structure))
+    return "\n".join(final_tree_lines)
 
+# --- context building function for templates ---
 def build_template_context(
     config: PromptConfig,
-    files: List[Dict[str, Any]],
-    git_diff: Optional[str],
-    git_diff_br: Optional[str],
-    git_log_br: Optional[str],
+    file_data_list: List[Dict[str, Any]],
+    git_staged_diff: Optional[str],
+    git_branch_diff: Optional[str],
+    git_branch_log: Optional[str],
 ) -> Dict[str, Any]:
-    logger.info("Building template context...")
-    if not (config.base_dir and config.base_dir.is_absolute()):
+    """
+    constructs the context dictionary passed to the handlebars template for rendering.
+    omits top-level keys if their values are none to simplify `{{#if key}}` checks in templates.
+    """
+    log.info("building_template_context")
+    if not (
+        config.base_dir and config.base_dir.is_absolute()
+    ):  # should be ensured by promptconfig
         raise TemplateError(
-            "Base directory not configured or not absolute for context."
+            "base_dir is not configured or not absolute for template context."
         )
 
-    tree_str = _build_tree_string(files, config)
-    root_display_name = config.base_dir.name or str(config.base_dir)
+    source_tree_str = _build_tree_string(file_data_list, config)
+    # use none if tree is placeholder, for cleaner template logic.
+    source_tree_for_ctx = (
+        source_tree_str
+        if source_tree_str and source_tree_str != "(no files included for tree.)"
+        else None
+    )
 
-    claude_idx: Dict[str, int] = {}
+    project_root_name = config.base_dir.name or str(
+        config.base_dir
+    )  # fallback to full path if no name (e.g. root '/')
+
+    # calculate indices for claude-optimal preset if it's active.
+    claude_document_indices: Dict[str, int] = {}
     if config.preset_template == PresetTemplate.CLAUDE_OPTIMAL:
-        current = len(files) + 1
-        if tree_str and tree_str != "(No files included for tree.)":
-            claude_idx["source_tree_idx"] = current
-            current += 1
-        if git_diff:
-            claude_idx["git_diff_idx"] = current
-            current += 1
-        if git_diff_br:
-            claude_idx["git_diff_branches_idx"] = current
-            current += 1
-        if git_log_br:
-            claude_idx["git_log_branches_idx"] = current
-            current += 1
+        idx_counter = len(file_data_list) + 1  # start indexing after file documents
+        if source_tree_for_ctx:
+            claude_document_indices["source_tree_idx"] = idx_counter
+            idx_counter += 1
+        if git_staged_diff:
+            claude_document_indices["git_diff_idx"] = idx_counter
+            idx_counter += 1
+        if git_branch_diff:
+            claude_document_indices["git_diff_branches_idx"] = idx_counter
+            idx_counter += 1
+        if git_branch_log:
+            claude_document_indices["git_log_branches_idx"] = idx_counter
+            idx_counter += 1
         if config.user_vars:
-            claude_idx["user_vars_idx"] = current
+            claude_document_indices["user_vars_idx"] = idx_counter
 
-    raw_ctx = {
+    # assemble the raw context dictionary.
+    raw_context_dict: Dict[str, Any] = {
         "project_root_path_absolute": str(config.base_dir),
-        "project_root_display_name": root_display_name,
-        "source_tree": tree_str
-        if tree_str != "(No files included for tree.)"
-        else None,
-        "files": files or None,  # Pass None if empty for cleaner {{#if files}}
-        "git_diff": git_diff or None,
-        "git_diff_branches": git_diff_br or None,
-        "git_log_branches": git_log_br or None,
+        "project_root_display_name": project_root_name,
+        "source_tree": source_tree_for_ctx,
+        "files": file_data_list
+        or None,  # pass none if list is empty for `{{#if files}}`
+        "git_diff": git_staged_diff or None,
+        "git_diff_branches": git_branch_diff or None,
+        "git_log_branches": git_branch_log or None,
         "user_vars": config.user_vars or None,
-        "claude_indices": claude_idx or None,
+        "claude_indices": claude_document_indices or None,  # only present if calculated
+        # branch names for context if diff/log between branches is present
         "git_diff_branch_base": config.git_diff_branch[0]
-        if config.git_diff_branch and git_diff_br
+        if config.git_diff_branch and git_branch_diff
         else None,
         "git_diff_branch_compare": config.git_diff_branch[1]
-        if config.git_diff_branch and git_diff_br
+        if config.git_diff_branch and git_branch_diff
         else None,
         "git_log_branch_base": config.git_log_branch[0]
-        if config.git_log_branch and git_log_br
+        if config.git_log_branch and git_branch_log
         else None,
         "git_log_branch_compare": config.git_log_branch[1]
-        if config.git_log_branch and git_log_br
+        if config.git_log_branch and git_branch_log
         else None,
     }
-    return {
-        k: v for k, v in raw_ctx.items() if v is not None
-    }  # Filter out None top-level keys
+    # filter out top-level keys that have none values for cleaner template logic.
+    final_context = {k: v for k, v in raw_context_dict.items() if v is not None}
+
+    log.debug("template_context_built", keys=list(final_context.keys()))
+    return final_context

@@ -1,14 +1,14 @@
 [project]
 name = "llmfiles"
-version = "0.2.0"
-description = "Intelligently build LLM prompts from codebases, git info, and templates."
+version = "0.4.0"
+description = "handy cli tool to build LLM prompts from files, codebases, git info, and templates."
 readme = "README.md"
 requires-python = ">=3.11" 
 license = { text = "Apache-2.0" }
 authors = [
     { name = "Fred Bliss"}, 
 ]
-classifiers = [ # Standard trove classifiers for PyPI
+classifiers = [ 
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -17,7 +17,7 @@ classifiers = [ # Standard trove classifiers for PyPI
     "Operating System :: OS Independent",
     "Topic :: Software Development :: Build Tools",
     "Topic :: Utilities",
-    "Environment :: Console", # Indicates it's a command-line application
+    "Environment :: Console",
     "Intended Audience :: Developers",
 ]
 dependencies = [
@@ -26,32 +26,27 @@ dependencies = [
     "pybars3>=0.9",       # Handlebars templating engine
     "tiktoken>=0.5",      # For OpenAI token counting
     "pyperclip>=1.8",     # For clipboard operations (copying output)
-    "rich>=13.0",
-    "PyYAML>=5.0",
+    "rich>=13.0",         # to make things... rich? yes.
+    "PyYAML>=5.0",        # For parsing YAML files and trunc'ing large data
+    "structlog",          # Better logging outputs
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-cov"]
+dev = ["pytest>=7.0", "pytest-cov", "mypy", "types-pyyaml", "types-toml", "ruff"]
 
 [project.scripts]
 llmfiles = "llmfiles.cli:main_cli_entrypoint"
 
-[project.urls] # Useful links related to the project
-Homepage = "https://github.com/fblissjr/llmfiles"
+[project.urls]
+homepage = "https://github.com/fblissjr/llmfiles"
+repository = "https://github.com/fblissjr/llmfiles"
 
-[build-system] # Standard PEP 517 build system configuration
-requires = ["hatchling"] # Specifies Hatchling as the build backend
+[build-system]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["llmfiles"]
-
-[tool.rye]
-managed = true # Indicates Rye manages this project
-dev-dependencies = [
-    "pytest>=7.0",
-    "pytest-cov"
-]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
