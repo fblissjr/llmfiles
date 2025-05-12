@@ -1,17 +1,24 @@
 # llmfiles/cli.py
-"""command line interface for llmfiles, using click and structlog."""
+"""
+command line interface for llmfiles.
+handles user input, configuration loading (cli > profile > file > defaults),
+logging setup, and orchestrates the prompt generation process.
+"""
 
-import click
 import sys
 import json
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, cast
+from dataclasses import fields as dataclass_fields, MISSING
 
+import click
 import tiktoken  # type: ignore
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
-import structlog  # for structured logging
+import structlog
+import logging as stdlib_logging  # for log level constants
 
-from llmfiles.config import (
+from . import __version__ as app_version
+from .config import (
     PromptConfig,
     SortMethod,
     OutputFormat,
@@ -24,41 +31,27 @@ from llmfiles.config import (
     DEFAULT_CONSOLE_SHOW_TOKEN_COUNT,
     DEFAULT_OUTPUT_FORMAT,
     DEFAULT_SORT_METHOD,
-    DEFAULT_ENCODING,  # bring in more defaults
+    DEFAULT_ENCODING,
 )
-from llmfiles.config_file import (
-    get_merged_config_defaults,
-    CONFIG_TO_PROMPTCONFIG_MAP,
-)  # for config file loading
-from llmfiles.logging_setup import умирать_configure_logging  # for structlog setup
-from llmfiles.discovery import discover_paths
-from llmfiles.processing import (
-    process_file_content,
-    PYYAML_AVAILABLE,
-)  # import pyyaml_available flag
-from llmfiles.git_utils import (
-    get_diff,
-    get_diff_branches,
-    get_log_branches,
-    check_is_git_repo,
-)
-from llmfiles.templating import TemplateRenderer, build_template_context
-from llmfiles.output import write_to_stdout, write_to_file, copy_to_clipboard
-from llmfiles.exceptions import SmartPromptBuilderError, TokenizerError, ConfigError
-from llmfiles import __version__ as app_version  # import version from __init__.py
+from .config_file import get_merged_config_defaults, CONFIG_TO_PROMPTCONFIG_MAP
+from .logging_setup import configure_logging
+from .discovery import discover_paths
+from .processing import process_file_content, PYYAML_AVAILABLE
+from .git_utils import get_diff, get_diff_branches, get_log_branches, check_is_git_repo
+from .templating import TemplateRenderer, build_template_context
+from .output import write_to_stdout, write_to_file, copy_to_clipboard
+from .exceptions import SmartPromptBuilderError, TokenizerError, ConfigError
 
-# get a structlog logger for this module. it will be configured by `умри_configure_logging`.
-log = structlog.get_logger(__name__)  # llmfiles.cli
+log = structlog.get_logger(__name__)
 
 
-# --- PromptGenerator Class (uses structlog) ---
+# --- PromptGenerator Class (as previously defined) ---
 class PromptGenerator:
     """orchestrates the prompt generation pipeline."""
+
     def __init__(self, config: PromptConfig):
         self.config: PromptConfig = config
-        self.log = structlog.get_logger(
-            self.__class__.__name__
-        )  # logger specific to this class instance
+        self.log = structlog.get_logger(self.__class__.__name__)
         self.file_data: List[Dict[str, Any]] = []
         self.git_diff_data: Optional[str] = None
         self.git_diff_branches_data: Optional[str] = None
@@ -67,86 +60,93 @@ class PromptGenerator:
         self.token_count: Optional[int] = None
 
     def _discover_paths(self) -> List[Path]:
-        self.log.info("step_1_discover_paths", base_dir=str(self.config.base_dir))
-        paths = list(
-            discover_paths(self.config)
-        )  # `discover_paths` also uses structlog
-        self.log.info("discovery_complete", found_paths=len(paths))
+        self.log.info("step_1_discover_paths_start", base_dir=str(self.config.base_dir))
+        paths = list(discover_paths(self.config))
+        self.log.info("step_1_discover_paths_complete", found_paths_count=len(paths))
         return paths
 
-    def _process_contents(self, paths: List[Path], progress: Progress) -> None:
-        self.log.info("step_2_process_file_contents", num_paths=len(paths))
-        task_id = progress.add_task("processing files...", total=len(paths))
-        processed, skipped = 0, 0
-        for p_obj in paths:
-            # `process_file_content` performs actual file reading and transformations.
-            res = process_file_content(p_obj, self.config)
-            if res:
-                content, raw_content, mod_time = res
-                # ensure base_dir is set for relative path calculation.
+    def _process_file_contents(
+        self, paths_to_process: List[Path], progress_bar: Progress
+    ) -> None:
+        self.log.info(
+            "step_2_process_file_contents_start", num_paths=len(paths_to_process)
+        )
+        task_id = progress_bar.add_task(
+            "processing files...", total=len(paths_to_process)
+        )
+        processed_files_count, skipped_files_count = 0, 0
+        for file_path in paths_to_process:
+            processed_result = process_file_content(file_path, self.config)
+            if processed_result:
+                formatted_content, raw_content_for_template, modification_time = (
+                    processed_result
+                )
                 if not self.config.base_dir:
                     raise ConfigError("base_dir not set before processing.")
-                # determine relative path for context.
-                rel_p = (
-                    p_obj.relative_to(self.config.base_dir)
-                    if p_obj.is_relative_to(self.config.base_dir)
-                    else p_obj.name
+                relative_path_obj = (
+                    file_path.relative_to(self.config.base_dir)
+                    if file_path.is_relative_to(self.config.base_dir)
+                    else Path(file_path.name)
                 )
-
-                entry: Dict[str, Any] = {
-                    "path": str(p_obj) if self.config.absolute_paths else str(rel_p),
-                    "relative_path": str(rel_p),
-                    "content": content,
-                    "raw_content": raw_content,
-                    "extension": p_obj.suffix[1:].lower() if p_obj.suffix else "",
+                file_entry: Dict[str, Any] = {
+                    "path": str(file_path)
+                    if self.config.absolute_paths
+                    else str(relative_path_obj),
+                    "relative_path": str(relative_path_obj),
+                    "content": formatted_content,
+                    "raw_content": raw_content_for_template,
+                    "extension": file_path.suffix[1:].lower()
+                    if file_path.suffix
+                    else "",
                 }
-                if mod_time is not None:
-                    entry["mod_time"] = mod_time  # only add if available
-                self.file_data.append(entry)
-                processed += 1
+                if modification_time is not None:
+                    file_entry["mod_time"] = modification_time
+                self.file_data.append(file_entry)
+                processed_files_count += 1
             else:
-                skipped += 1
-            progress.update(task_id, advance=1)
-        progress.update(
-            task_id, description=f"processed {processed} files (skipped {skipped})."
+                skipped_files_count += 1
+            progress_bar.update(task_id, advance=1)
+        progress_bar.update(
+            task_id,
+            description=f"processed {processed_files_count} files (skipped {skipped_files_count}).",
         )
         self.log.info(
-            "file_content_processing_complete", included=processed, skipped=skipped
+            "step_2_process_file_contents_complete",
+            included=processed_files_count,
+            skipped=skipped_files_count,
         )
 
-    def _sort_data(self) -> None:
+    def _sort_file_data(self) -> None:
         self.log.info(
-            "step_3_sorting_files",
+            "step_3_sorting_files_start",
             num_files=len(self.file_data),
             method=self.config.sort_method.value,
         )
-        key_func: Optional[Any] = None
-        reverse_order = False
-        sort_method_val = self.config.sort_method
-        if sort_method_val == SortMethod.NAME_ASC:
-            key_func = lambda x: x["relative_path"]
-        elif sort_method_val == SortMethod.NAME_DESC:
-            key_func, reverse_order = lambda x: x["relative_path"], True
-        elif sort_method_val == SortMethod.DATE_ASC:
-            key_func = lambda x: x.get("mod_time", float("inf"))  # Nones last
-        elif sort_method_val == SortMethod.DATE_DESC:
-            key_func, reverse_order = (
+        key_function: Optional[Any] = None
+        should_reverse = False
+        sort_method = self.config.sort_method
+        if sort_method == SortMethod.NAME_ASC:
+            key_function = lambda x: x["relative_path"]
+        elif sort_method == SortMethod.NAME_DESC:
+            key_function, should_reverse = lambda x: x["relative_path"], True
+        elif sort_method == SortMethod.DATE_ASC:
+            key_function = lambda x: x.get("mod_time", float("inf"))
+        elif sort_method == SortMethod.DATE_DESC:
+            key_function, should_reverse = (
                 lambda x: x.get("mod_time", float("-inf")),
                 True,
-            )  # Nones first if not reversed, last if reversed
-
-        if key_func:
+            )
+        if key_function:
             try:
-                self.file_data.sort(key=key_func, reverse=reverse_order)
+                self.file_data.sort(key=key_function, reverse=should_reverse)
             except Exception as e:
                 self.log.warning(
-                    "file_sort_failed",
-                    error=str(e),
-                    note="proceeding with unsorted data.",
+                    "file_sort_failed", error=str(e), note="proceeding unsorted."
                 )
+        self.log.info("step_3_sorting_files_complete")
 
-    def _fetch_git(self) -> None:
-        self.log.info("step_4_fetch_git_info")
+    def _fetch_git_information(self) -> None:
+        self.log.info("step_4_fetch_git_info_start")
         if not self.config.base_dir or not check_is_git_repo(self.config.base_dir):
             if any(
                 [
@@ -156,7 +156,7 @@ class PromptGenerator:
                 ]
             ):
                 self.log.warning(
-                    "git_ops_skipped_not_a_repo_or_git_unavailable",
+                    "git_ops_skipped_not_repo_or_git_unavailable",
                     path=str(self.config.base_dir),
                 )
             return
@@ -177,53 +177,43 @@ class PromptGenerator:
                     self.config.base_dir, b1, b2
                 )
         except SmartPromptBuilderError as e:
-            self.log.error(
-                "git_operation_failed", error=str(e), note="git info might be missing."
-            )
+            self.log.error("git_operation_failed_known_error", error=str(e))
+        self.log.info("step_4_fetch_git_info_complete")
 
-    def _render(self) -> None:
-        self.log.info("step_5_render_template")
-        context = build_template_context(
+    def _render_final_prompt(self) -> None:
+        self.log.info("step_5_render_template_start")
+        template_context = build_template_context(
             self.config,
             self.file_data,
             self.git_diff_data,
             self.git_diff_branches_data,
             self.git_log_branches_data,
         )
-        self.rendered_prompt = TemplateRenderer(self.config).render(
-            context
-        )  # template_renderer also uses structlog
+        renderer = TemplateRenderer(self.config)
+        self.rendered_prompt = renderer.render(template_context)
+        self.log.info("step_5_render_template_complete")
 
-    def _count_tokens(self) -> None:
+    def _calculate_prompt_tokens(self) -> None:
         if (
             self.config.show_tokens_format or self.config.console_show_token_count
         ) and self.rendered_prompt:
-            self.log.info("step_6_count_tokens", encoding=self.config.encoding)
+            self.log.info("step_6_count_tokens_start", encoding=self.config.encoding)
             try:
-                # tiktoken.encoding_for_model(self.config.encoding) # optional: validates encoding name
                 encoder = tiktoken.get_encoding(self.config.encoding)
                 self.token_count = len(
                     encoder.encode(self.rendered_prompt, disallowed_special=())
                 )
-                self.log.info("token_count_calculated", count=self.token_count)
-            except (
-                Exception
-            ) as e:  # handles valueerror for unknown encoding, other tiktoken issues
+            except Exception as e:
                 raise TokenizerError(
                     f"token calculation failed for encoding '{self.config.encoding}': {e}"
                 )
+            self.log.info("step_6_count_tokens_complete", count=self.token_count)
 
     def generate(self) -> str:
-        """main pipeline to generate the prompt, with progress display."""
-        # determine if progress bar should be disabled (e.g., if not logging at info/debug or not tty).
-        # structlog config determines actual log output; this is for rich progress.
-        effective_log_level = logging.getLogger(
-            "llmfiles"
-        ).getEffectiveLevel()  # check our namespace logger
+        app_log_level = stdlib_logging.getLogger("llmfiles").getEffectiveLevel()
         is_progress_disabled = (
-            effective_log_level > logging.INFO or not sys.stderr.isatty()
+            app_log_level > stdlib_logging.INFO or not sys.stderr.isatty()
         )
-
         with Progress(
             SpinnerColumn(),
             TextColumn("[bold blue]{task.description}"),
@@ -232,30 +222,28 @@ class PromptGenerator:
             transient=False,
             disable=is_progress_disabled,
         ) as progress_bar:
-            # each step updates its task on the progress bar.
-            paths = self._discover_paths()
+            discover_task = progress_bar.add_task("discovering paths...", total=1)
+            discovered_file_paths = self._discover_paths()
             progress_bar.update(
-                progress_bar.add_task("discovering paths...", total=1),
+                discover_task,
                 completed=1,
-                description=f"found {len(paths)} potential paths.",
+                description=f"found {len(discovered_file_paths)} potential paths.",
             )
-
-            if paths:
-                self._process_contents(paths, progress_bar)  # this adds its own task
+            if discovered_file_paths:
+                self._process_file_contents(discovered_file_paths, progress_bar)
             else:
                 progress_bar.update(
                     progress_bar.add_task("processing files...", total=1),
                     completed=1,
                     description="no files to process.",
                 )
-
-            self._sort_data()
+            sort_task = progress_bar.add_task("sorting files...", total=1)
+            self._sort_file_data()
             progress_bar.update(
-                progress_bar.add_task("sorting files...", total=1),
+                sort_task,
                 completed=1,
-                description=f"sorted {len(self.file_data)} files.",
+                description=f"sorted {len(self.file_data)} file entries.",
             )
-
             if any(
                 [
                     self.config.diff,
@@ -263,103 +251,77 @@ class PromptGenerator:
                     self.config.git_log_branch,
                 ]
             ):
-                self._fetch_git()
+                git_task = progress_bar.add_task("fetching git info...", total=1)
+                self._fetch_git_information()
                 progress_bar.update(
-                    progress_bar.add_task("fetching git info...", total=1),
+                    git_task,
                     completed=1,
                     description="git info fetched (if applicable).",
                 )
-
-            self._render()
+            render_task = progress_bar.add_task("rendering prompt...", total=1)
+            self._render_final_prompt()
             progress_bar.update(
-                progress_bar.add_task("rendering prompt...", total=1),
-                completed=1,
-                description="prompt rendered.",
+                render_task, completed=1, description="prompt rendered."
             )
-
-            if (
-                self.config.show_tokens_format or self.config.console_show_token_count
-            ):  # count if needed for any display
-                self._count_tokens()
+            if self.config.show_tokens_format or self.config.console_show_token_count:
+                token_task = progress_bar.add_task("counting tokens...", total=1)
+                self._calculate_prompt_tokens()
                 token_count_display = (
                     str(self.token_count) if self.token_count is not None else "n/a"
                 )
                 progress_bar.update(
-                    progress_bar.add_task("counting tokens...", total=1),
+                    token_task,
                     completed=1,
                     description=f"tokens: {token_count_display}.",
                 )
-
         if not self.rendered_prompt:
-            raise SmartPromptBuilderError(
-                "prompt generation pipeline completed, but no content was rendered."
-            )
+            raise SmartPromptBuilderError("prompt generation resulted in no content.")
         return self.rendered_prompt
 
-# --- console summary output function ---
-def _print_console_summary_info(config: PromptConfig, generator: PromptGenerator):
-    """prints summary information (tree, file counts, tokens) to stderr if configured."""
-    log.debug(
-        "printing_console_summary_info_if_configured"
-    )  # structlog for internal logging
-    # use click.echo for user-facing stderr messages for consistency with click.
-    if config.console_show_summary:
-        click.secho("--- execution summary ---", fg="blue", err=True)
-        click.echo(f"files processed: {len(generator.file_data)}", err=True)
-        # todo: add more summary info like total lines, skipped files etc. if valuable.
 
+# --- console summary output utility ---
+def _print_console_summary_output(config: PromptConfig, generator: PromptGenerator):
+    log.debug("console_summary_output_check")
+    if config.console_show_summary:
+        click.secho("--- execution summary ---", fg="cyan", err=True)
+        click.echo(f"files processed for prompt: {len(generator.file_data)}", err=True)
     if config.console_show_tree and generator.file_data:
-        # build_template_context is heavy if only tree is needed.
-        # consider a lighter way if this becomes a performance concern for just console tree.
-        # for now, reuse existing logic.
         tree_context = build_template_context(
             config, generator.file_data, None, None, None
         )
         if tree_context.get("source_tree"):
             click.secho(
-                "\n--- project structure (console preview) ---", fg="blue", err=True
+                "\n--- project structure (console preview) ---", fg="cyan", err=True
             )
             click.echo(tree_context["source_tree"], err=True)
-
     if config.console_show_token_count:
-        if generator.token_count is not None:
-            token_display_str = (
-                f"{generator.token_count:,}"  # always human-readable for console
-            )
-            click.secho(
-                f"\nestimated token count ({config.encoding}): {token_display_str}",
-                fg="yellow",
-                err=True,
-            )
-        else:
-            click.secho(
-                f"\nestimated token count ({config.encoding}): not calculated or n/a",
-                fg="yellow",
-                err=True,
-            )
+        tc_val = generator.token_count
+        token_display = f"{tc_val:,}" if tc_val is not None else "not calculated or n/a"
+        click.secho(
+            f"\nestimated token count ({config.encoding}): {token_display}",
+            fg="yellow",
+            err=True,
+        )
 
 
 # --- main execution flow for the default command ---
 def _execute_main_prompt_generation_flow(effective_config: PromptConfig):
-    """main execution logic using the resolved `effective_config`."""
-    log.info("main_flow_started", config_source=effective_config.__class__.__name__)
+    log.info("main_flow_started", config_type=effective_config.__class__.__name__)
     try:
-        prompt_generator = PromptGenerator(effective_config)
-        final_prompt_output_str = prompt_generator.generate()  # core work happens here
-        log.info("prompt_generation_successful")
-
-        # determine output content (json structure or raw prompt)
+        prompt_generator_instance = PromptGenerator(effective_config)
+        final_prompt_str = prompt_generator_instance.generate()
+        log.info("prompt_generation_pipeline_successful")
         output_to_write: str
-        is_json_output_format = effective_config.output_format == OutputFormat.JSON
-        if is_json_output_format:
+        is_json_output_mode = effective_config.output_format == OutputFormat.JSON
+        if is_json_output_mode:
             log.debug("formatting_output_as_json_structure")
             json_payload: Dict[str, Any] = {
-                "prompt_content": final_prompt_output_str,  # the rendered template output
-                "metadata": {  # metadata about the generation process
+                "prompt_content": final_prompt_str,
+                "metadata": {
                     "base_directory": str(effective_config.base_dir)
                     if effective_config.base_dir
                     else None,
-                    "files_included_count": len(prompt_generator.file_data),
+                    "files_included_count": len(prompt_generator_instance.file_data),
                     "output_format_requested": effective_config.output_format.value,
                     "template_source_identifier": (
                         str(effective_config.template_path)
@@ -370,183 +332,168 @@ def _execute_main_prompt_generation_flow(effective_config: PromptConfig):
                             else "default_for_format"
                         )
                     ),
-                    # add other relevant metadata from effective_config
                 },
             }
-            if prompt_generator.token_count is not None:  # add token info if calculated
+            if prompt_generator_instance.token_count is not None:
                 json_payload["token_information"] = {
-                    "count": prompt_generator.token_count,
+                    "count": prompt_generator_instance.token_count,
                     "encoding_used": effective_config.encoding,
                 }
             try:
                 output_to_write = json.dumps(json_payload, indent=2) + "\n"
-            except TypeError as e:  # should not happen with basic types
+            except TypeError as e:
                 log.error("json_serialization_failed", error=str(e), exc_info=True)
                 click.echo(
-                    "error: failed to create json output. falling back to raw prompt content.",
+                    "error: failed to create json. falling back to raw prompt.",
                     err=True,
                 )
-                output_to_write = final_prompt_output_str  # fallback to raw content
-                is_json_output_format = (
-                    False  # no longer treat as json for output purposes
-                )
+                output_to_write = final_prompt_str
+                is_json_output_mode = False
         else:
-            output_to_write = final_prompt_output_str  # already ends with newline from templaterenderer
-
-        # handle output destinations (file, clipboard, stdout)
+            output_to_write = final_prompt_str
         output_destination_was_used = False
         if effective_config.output_file:
             write_to_file(effective_config.output_file, output_to_write)
-            # user-facing messages to stderr to keep stdout clean for potential piping.
-            click.echo(
-                f"info: prompt output written to: {effective_config.output_file}",
-                err=True,
-            )
+            click.echo(f"info: output to: {effective_config.output_file}", err=True)
             output_destination_was_used = True
-
-        clipboard_copy_succeeded = False
+        clipboard_copy_was_ok = False
         if effective_config.clipboard:
-            # for json, copy only the prompt_content part. for others, copy the whole output.
             content_for_clipboard = (
-                final_prompt_output_str if is_json_output_format else output_to_write
+                final_prompt_str if is_json_output_mode else output_to_write
             )
-            if copy_to_clipboard(
-                content_for_clipboard.strip()
-            ):  # strip for cleaner clipboard content
-                clipboard_copy_succeeded = True
-            output_destination_was_used = (
-                True  # attempting to copy counts as a destination.
-            )
-
-        # if no file output and (clipboard not requested or failed), print to stdout.
+            if copy_to_clipboard(content_for_clipboard.strip()):
+                clipboard_copy_was_ok = True
+            output_destination_was_used = True
         if not output_destination_was_used or (
-            effective_config.clipboard and not clipboard_copy_succeeded
+            effective_config.clipboard and not clipboard_copy_was_ok
         ):
-            if effective_config.clipboard and not clipboard_copy_succeeded:
+            if effective_config.clipboard and not clipboard_copy_was_ok:
                 click.echo(
-                    "info: clipboard copy failed. outputting to standard output instead.",
+                    "info: clipboard copy failed. outputting to stdout.",
                     file=sys.stderr,
                 )
             log.info("writing_final_prompt_to_stdout")
             write_to_stdout(output_to_write)
-
-        # display token count for the main output (--show-tokens) if requested.
-        # this is separate from console-specific token display.
         if (
             effective_config.show_tokens_format
-            and prompt_generator.token_count is not None
+            and prompt_generator_instance.token_count is not None
         ):
-            token_format_enum = effective_config.show_tokens_format
+            fmt = effective_config.show_tokens_format
             count_str = (
-                f"{prompt_generator.token_count:,}"
-                if token_format_enum == TokenCountFormat.HUMAN
-                else str(prompt_generator.token_count)
+                f"{prompt_generator_instance.token_count:,}"
+                if fmt == TokenCountFormat.HUMAN
+                else str(prompt_generator_instance.token_count)
             )
             click.echo(
-                f"token count (for main output, encoding: '{effective_config.encoding}'): {count_str}",
+                f"token count (main output, enc: '{effective_config.encoding}'): {count_str}",
                 err=True,
             )
-        elif effective_config.show_tokens_format:  # requested but not available
+        elif effective_config.show_tokens_format:
             log.warning("show_tokens_requested_but_not_available")
             click.echo(
-                f"token count (for main output, encoding: '{effective_config.encoding}'): calculation failed or n/a.",
+                f"token count (main output, enc: '{effective_config.encoding}'): n/a.",
                 err=True,
             )
-
-        # print additional console summary info if configured (uses `effective_config.console_...` flags).
-        _print_console_summary_info(effective_config, prompt_generator)
-
-    except SmartPromptBuilderError as e:  # catch known application errors.
+        _print_console_summary_output(effective_config, prompt_generator_instance)
+    except SmartPromptBuilderError as e:
         log.error(
-            "prompt_generation_failed_known_error",
+            "main_flow_error_known",
             error_message=str(e),
-            exc_info=log.getEffectiveLevel() <= logging.DEBUG,
+            exc_info=log.getEffectiveLevel() <= stdlib_logging.DEBUG,
         )
         click.echo(f"error: {e}", err=True)
-        sys.exit(1)  # exit with error status.
-    except Exception as e:  # catch-all for unexpected errors in this flow.
+        sys.exit(1)  # type: ignore
+    except Exception as e:
         log.critical(
-            "unexpected_critical_error_in_main_flow",
-            error_message=str(e),
-            exc_info=True,
+            "main_flow_error_unexpected_critical", error_message=str(e), exc_info=True
         )
-        click.echo(
-            f"unexpected error: {e}. please check logs or run with -vv for details.",
-            err=True,
-        )
+        click.echo(f"unexpected error: {e}. see logs or run with -vv.", err=True)
         sys.exit(1)
 
 
-# --- click cli group definition ---
 @click.group(
     context_settings=dict(help_option_names=["-h", "--help"]),
     invoke_without_command=True,
 )
-# define cli options. use `default=None` for options where absence should be distinguishable from explicit value,
-# to allow config file defaults to apply correctly if cli option is not used.
-# flags (boolean options) default to false if not specified.
-# input sources
 @click.option(
+    "-in",
+    "-I",
     "--input-path",
     "input_paths",
     multiple=True,
     type=click.Path(readable=True, path_type=Path),
     default=None,
-    help="paths to include (file/dir). default: '.' if not stdin.",
+    help="paths to include. default: '.' if not stdin.",
 )
-@click.option("--stdin", is_flag=True, help="read paths from stdin.")
+@click.option("--stdin", is_flag=True, default=False, help="read paths from stdin.")
 @click.option(
-    "-0", "--null", "nul_separated", is_flag=True, help="stdin paths are nul-separated."
+    "-0",
+    "--null",
+    "nul_separated",
+    is_flag=True,
+    default=False,
+    help="stdin paths are nul-separated.",
 )
-# filtering
 @click.option(
     "-i",
     "--include",
     "include_patterns",
     multiple=True,
-    help='glob patterns to include (e.g., "**/*.py").',
+    help="glob patterns to include.",
 )
 @click.option(
     "-e",
     "--exclude",
     "exclude_patterns",
     multiple=True,
-    help='glob patterns to exclude (e.g., "**/node_modules/**").',
+    help="glob patterns to exclude.",
 )
 @click.option(
     "--include-priority",
+    "include_priority",
     is_flag=True,
-    help="if a path matches include and exclude, include it.",
+    default=False,
+    help="include overrides exclude.",
 )
-@click.option("--no-ignore", is_flag=True, help="do not use .gitignore files.")
 @click.option(
-    "--hidden",
+    "--no-ignore",
+    "no_ignore",
     is_flag=True,
-    help="include hidden files/directories (starting with '.').",
+    default=False,
+    help="ignore .gitignore files.",
 )
-@click.option("-L", "--follow-symlinks", is_flag=True, help="follow symbolic links.")
-# templating & formatting
+@click.option(
+    "--hidden", is_flag=True, default=False, help="include hidden files/dirs."
+)
+@click.option(
+    "-L",
+    "--follow-symlinks",
+    "follow_symlinks",
+    is_flag=True,
+    default=False,
+    help="follow symlinks.",
+)
 @click.option(
     "-t",
     "--template",
     "template_path",
     type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
     default=None,
-    help="path to custom handlebars template file.",
+    help="path to custom handlebars template.",
 )
 @click.option(
     "--preset",
     "preset_template_str",
     type=click.Choice([p.value for p in PresetTemplate]),
     default=None,
-    help="use a built-in preset template.",
+    help="use a built-in preset.",
 )
 @click.option(
     "--var",
     "user_vars_list",
     multiple=True,
     metavar="key=value",
-    help="user variables for custom templates.",
+    help="user variables for templates.",
 )
 @click.option(
     "-F",
@@ -561,25 +508,28 @@ def _execute_main_prompt_generation_flow(effective_config: PromptConfig):
     "--line-numbers",
     "line_numbers",
     is_flag=True,
-    help="prepend line numbers to file content.",
+    default=False,
+    help="prepend line numbers.",
 )
 @click.option(
     "--no-codeblock",
     "no_codeblock",
     is_flag=True,
-    help="do not wrap file content in markdown code blocks.",
+    default=False,
+    help="no markdown code blocks.",
 )
 @click.option(
     "--absolute-paths",
     "absolute_paths",
     is_flag=True,
-    help="use absolute file paths in template context.",
+    default=False,
+    help="use absolute file paths in context.",
 )
-# yaml processing
 @click.option(
     "--yaml-truncate-long-fields",
     "process_yaml_truncate_long_fields",
     is_flag=True,
+    default=False,
     help="truncate long fields in yaml (needs pyyaml).",
 )
 @click.option(
@@ -594,7 +544,6 @@ def _execute_main_prompt_generation_flow(effective_config: PromptConfig):
     default=None,
     help=f"max length for yaml field truncation (default: {DEFAULT_YAML_TRUNCATE_CONTENT_MAX_LEN}).",
 )
-# sorting
 @click.option(
     "--sort",
     "sort_method_str",
@@ -602,15 +551,15 @@ def _execute_main_prompt_generation_flow(effective_config: PromptConfig):
     default=None,
     help=f"sort files by method (default: {DEFAULT_SORT_METHOD.value}).",
 )
-# git
-@click.option("--diff", "diff", is_flag=True, help="include staged git diff.")
+@click.option(
+    "--diff", "diff", is_flag=True, default=False, help="include staged git diff."
+)
 @click.option(
     "--git-diff-branch", nargs=2, metavar="base comp", help="git diff between branches."
 )
 @click.option(
     "--git-log-branch", nargs=2, metavar="base comp", help="git log between branches."
 )
-# tokenizer
 @click.option(
     "-c",
     "--encoding",
@@ -622,9 +571,8 @@ def _execute_main_prompt_generation_flow(effective_config: PromptConfig):
     "show_tokens_format_str",
     type=click.Choice([f.value for f in TokenCountFormat]),
     default=None,
-    help="show token count (for main output) on stderr.",
+    help="show token count (main output) on stderr.",
 )
-# output destinations
 @click.option(
     "-o",
     "--output",
@@ -634,13 +582,12 @@ def _execute_main_prompt_generation_flow(effective_config: PromptConfig):
     help="write output to file.",
 )
 @click.option(
-    "--clipboard", is_flag=True, help="copy prompt content to system clipboard."
+    "--clipboard", is_flag=True, default=False, help="copy prompt to clipboard."
 )
-# console output preferences (new flags)
 @click.option(
     "--console-tree/--no-console-tree",
     default=None,
-    help="show/hide project tree on console (stderr).",
+    help="show/hide project tree on console.",
 )
 @click.option(
     "--console-summary/--no-console-summary",
@@ -653,304 +600,227 @@ def _execute_main_prompt_generation_flow(effective_config: PromptConfig):
     default=None,
     help="show/hide token count on console.",
 )
-# general cli options
 @click.option(
     "--config-profile",
-    "config_profile_name",
+    "active_config_profile_name",
     default=None,
     help="load a specific profile from config file(s).",
 )
 @click.option(
     "--verbose",
     "-v",
-    "verbosity",
+    "verbosity_level",
     count=True,
-    help="increase verbosity: -v info, -vv debug.",
+    help="verbosity: -v info, -vv debug.",
 )
 @click.option(
-    "--force-json-logs", is_flag=True, help="force json output for logs, even if tty."
+    "--force-json-logs",
+    "force_json_logs_cli",
+    is_flag=True,
+    default=False,
+    help="force json output for logs.",
 )
 @click.version_option(
     version=app_version, package_name="llmfiles", prog_name="llmfiles"
 )
-@click.pass_context  # injects the click context object as `ctx`
+@click.pass_context
 def main_cli_group(
-    ctx: click.Context, **cli_options: Any
-):  # cli_options collects all defined @click.option values
-    """
-    llmfiles: intelligently build llm prompts from your codebase, git info, and custom templates.
-    run `llmfiles --help` for all options.
-    configuration can be set in `.llmfiles.toml` or `~/.config/llmfiles/config.toml`.
-    """
-    # 1. configure logging as early as possible.
-    log_level = "warning"  # default
-    if cli_options.get("verbosity", 0) == 1:
+    ctx: click.Context, **cli_params_from_click: Any
+):  # cli_params_from_click collects all options by their dest name
+    """llmfiles: build llm prompts from codebases, git info, and templates."""
+
+    log_level = "warning"
+    if cli_params_from_click.get("verbosity_level", 0) == 1:
         log_level = "info"
-    elif cli_options.get("verbosity", 0) >= 2:
+    elif cli_params_from_click.get("verbosity_level", 0) >= 2:
         log_level = "debug"
-    умри_configure_logging(
+    configure_logging(
         log_level_str=log_level,
-        force_json_logs=cli_options.get("force_json_logs", False),
+        force_json_logs=cli_params_from_click.get("force_json_logs_cli", False),
     )
 
     log.debug(
-        "cli_invoked",
-        raw_cli_options=cli_options,
+        "cli_group_invoked",
+        raw_cli_params=cli_params_from_click,
         invoked_subcommand=ctx.invoked_subcommand,
     )
 
-    if ctx.invoked_subcommand is None:  # default action: generate prompt
-        log.debug("default_command_flow_initiated")
+    if ctx.invoked_subcommand is None:
+        log.debug("default_command_flow_starting")
         try:
-            # 2. load defaults from config file(s), potentially using a profile
-            file_and_profile_defaults = (
-                get_merged_config_defaults()
-            )  # from config_file.py
-            profile_name = cli_options.get("config_profile_name")
+            file_and_profile_defaults = get_merged_config_defaults()
+            profile_name = cli_params_from_click.get("active_config_profile_name")
+            effective_config_source = {**file_and_profile_defaults}
             if profile_name:
-                profile_settings = file_and_profile_defaults.get("profiles", {}).get(
+                profile_cfg = file_and_profile_defaults.get("profiles", {}).get(
                     profile_name, {}
                 )
-                log.info(
-                    "loading_config_profile",
-                    profile_name=profile_name,
-                    settings_found=bool(profile_settings),
+                if profile_cfg:
+                    log.info("applying_config_profile", profile_name=profile_name)
+                    effective_config_source.update(profile_cfg)
+                else:
+                    log.warning("config_profile_not_found", profile_name=profile_name)
+
+            pc_init_kwargs: Dict[str, Any] = {}
+            for field_def in dataclass_fields(PromptConfig):
+                if not field_def.init:
+                    continue
+                pc_attr_name = field_def.name
+
+                # 1. start with hardcoded dataclass default
+                if field_def.default_factory is not MISSING:
+                    current_value = field_def.default_factory()
+                elif field_def.default is not MISSING:
+                    current_value = field_def.default
+                else:
+                    current_value = None  # Should have a default or default_factory
+                log.debug(
+                    "attr_initial_default", attr=pc_attr_name, value=current_value
                 )
-                # merge profile settings over general file defaults
-                file_and_profile_defaults.update(profile_settings)
 
-            # 3. determine effective configuration: cli > profile > file > hardcoded
-            # start with hardcoded defaults (from promptconfig dataclass)
-            effective_settings: Dict[str, Any] = {
-                f.name: f.default
-                if f.default_factory is type(None)
-                else f.default_factory()  # type: ignore
-                for f in fields(PromptConfig)
-                if f.init  # only init=true fields
-            }
-            log.debug("initial_hardcoded_defaults_for_config", **effective_settings)
+                # 2. override with value from (profile > file) config
+                toml_key: Optional[str] = None
+                for cfg_k_map, pc_k_map in CONFIG_TO_PROMPTCONFIG_MAP.items():
+                    if pc_k_map == pc_attr_name:
+                        toml_key = cfg_k_map
+                        break
 
-            # layer file/profile defaults
-            for conf_key, pc_attr_name in CONFIG_TO_PROMPTCONFIG_MAP.items():
-                if conf_key in file_and_profile_defaults:
-                    effective_settings[pc_attr_name] = file_and_profile_defaults[
-                        conf_key
-                    ]
-            log.debug("config_after_file_profile_defaults", **effective_settings)
+                if toml_key and toml_key in effective_config_source:
+                    current_value = effective_config_source[toml_key]
+                    log.debug(
+                        "attr_value_from_config_file_or_profile",
+                        attr=pc_attr_name,
+                        value=current_value,
+                        source_key=toml_key,
+                    )
 
-            # layer cli options if they were explicitly set by the user
-            for opt_name_in_click, pc_attr_name in CONFIG_TO_PROMPTCONFIG_MAP.items():
-                # map click option name (e.g. 'input_paths') to what's in cli_options (e.g. 'cli_input_paths')
-                # this mapping needs to be robust. for now, assume cli_options keys match some transformation
-                # of pc_attr_name or are handled by direct key lookup.
-                # A direct mapping from `CONFIG_TO_PROMPTCONFIG_MAP` value (pc_attr) to `cli_options` key is needed.
-                # This is complex because click option names are not always 1:1 with PromptConfig attrs.
-                # Let's simplify by iterating cli_options which are already mapped by click.
-                pass  # Placeholder for refined merge logic
+                # 3. override with cli value if explicitly set by user
+                # cli_params_from_click keys are the 'dest' names from @click.option.
+                # assuming dest names match PromptConfig field names.
+                if pc_attr_name in cli_params_from_click:
+                    cli_value = cli_params_from_click[pc_attr_name]
+                    # use param.name (which is the dest) for get_parameter_source.
+                    # this requires iterating ctx.command.params if pc_attr_name might not be the direct dest.
+                    # for simplicity, assume pc_attr_name is the dest for now.
+                    source_for_this_attr = ctx.get_parameter_source(pc_attr_name)
 
-            # simpler merge: start with config_data, override with cli_options where user provided input
-            config_data_for_init = {
-                **file_and_profile_defaults
-            }  # start with file/profile config
-
-            # iterate over promptconfig fields to build final kwargs for instantiation
-            for pc_field in fields(PromptConfig):
-                if not pc_field.init:
-                    continue  # skip init=false fields like base_dir
-
-                cli_param_name = pc_field.name  # assume cli option name matches promptconfig field for simplicity here
-                # in reality, it's 'cli_' + pc_field.name from @click.option
-                # or requires a map if names differ significantly.
-                # For now, use direct mapping logic as in previous version.
-
-                # Use mapping to find the key in cli_options dict
-                cli_option_key_in_kwargs: Optional[str] = None
-                for (
-                    k_click,
-                    k_pc,
-                ) in (
-                    CONFIG_TO_PROMPTCONFIG_MAP.items()
-                ):  # This map is file_key -> pc_key
-                    # Need a map: pc_key -> click_param_name (e.g. 'input_paths' -> 'cli_input_paths')
-                    # This is getting overly complex for this response.
-                    # Sticking to the previous simpler merge strategy for now.
-                    pass
-
-                # Simplified explicit override logic:
-                # Iterate through CLI options that were actually passed (not defaults)
-                # This requires using `ctx.get_parameter_source`
-                for (
-                    option_name,
-                    _,
-                ) in (
-                    CONFIG_TO_PROMPTCONFIG_MAP.items()
-                ):  # option_name is key from config file
-                    pc_attr = CONFIG_TO_PROMPTCONFIG_MAP[option_name]
-
-                    # Find the corresponding click parameter name (usually pc_attr or "cli_" + pc_attr)
-                    # This is a bit manual; a direct map would be better.
-                    # For now, assume cli_options keys are derived from PromptConfig fields.
-                    cli_option_val = cli_options.get(pc_attr)  # Try direct match
-                    if cli_option_val is None and cli_options.get(
-                        f"cli_{pc_attr}"
-                    ):  # Try with "cli_" prefix
-                        cli_option_val = cli_options.get(f"cli_{pc_attr}")
-
-                    # Check if the CLI option was provided by the user
-                    # Note: get_parameter_source needs the actual option name, not the callback param name
-                    # This part is tricky; Click stores params by their callback names.
-                    # We need to map PromptConfig attribute names back to Click option names.
-
-                    # Let's use a simpler approach: any value in cli_options (passed as **kwargs to main_cli_group)
-                    # that is not None (for non-flags) or explicitly True/False (for flags if default=None)
-                    # should override.
-
-                    if pc_attr in cli_options:  # Check if key exists from CLI parsing
-                        cli_val_for_attr = cli_options[pc_attr]
-
-                        # Determine if CLI value should override (i.e., was explicitly set or is a meaningful flag)
-                        is_explicit_cli_val = False
-                        try:
-                            # Use option name as defined in @click.option, not necessarily pc_attr
-                            # This requires a reverse map or careful naming.
-                            # For now, assume option_name from CONFIG_TO_PROMPTCONFIG_MAP maps to cli_options key if it exists.
-                            # This logic needs robust mapping for all options.
-                            # Example: if CONFIG_TO_PROMPTCONFIG_MAP has "include": "include_patterns"
-                            # and cli_options has "include_patterns": ["val"], source for "include" option.
-
-                            # This is the click option name (e.g. "include" not "include_patterns")
-                            click_opt_name_for_source_check = (
-                                option_name  # From CONFIG_TO_PROMPTCONFIG_MAP keys
-                            )
-
-                            param_obj = next(
-                                (
-                                    p
-                                    for p in ctx.command.params
-                                    if p.name == click_opt_name_for_source_check
-                                    or any(
-                                        opt_str.strip("-").replace("-", "_")
-                                        == click_opt_name_for_source_check
-                                        for opt_str in p.opts
-                                    )
-                                ),
-                                None,
-                            )
-
-                            if (
-                                param_obj
-                                and ctx.get_parameter_source(param_obj.name)
-                                == click.core.ParameterSource.COMMAND_LINE
-                            ):
-                                is_explicit_cli_val = True
-                        except Exception:  # If param_obj not found, etc.
-                            pass  # Default to not explicit
-
-                        if is_explicit_cli_val or (
-                            isinstance(cli_val_for_attr, bool)
-                            and pc_attr in cli_options
-                        ):  # Handle flags
-                            # Convert string enums from CLI if necessary
-                            if pc_attr == "preset_template":
-                                config_data_for_init[pc_attr] = (
-                                    PresetTemplate.from_string(cli_val_for_attr)
-                                    if cli_val_for_attr
-                                    else None
-                                )
-                            elif pc_attr == "output_format":
-                                config_data_for_init[pc_attr] = (
-                                    OutputFormat.from_string(cli_val_for_attr)
-                                    or DEFAULT_OUTPUT_FORMAT
-                                )
-                            elif pc_attr == "sort_method":
-                                config_data_for_init[pc_attr] = (
-                                    SortMethod.from_string(cli_val_for_attr)
-                                    or DEFAULT_SORT_METHOD
-                                )
-                            elif pc_attr == "show_tokens_format":
-                                config_data_for_init[pc_attr] = (
-                                    TokenCountFormat.from_string(cli_val_for_attr)
-                                    if cli_val_for_attr
-                                    else None
-                                )
-                            elif (
-                                pc_attr == "user_vars"
-                            ):  # cli_val_for_attr is user_vars_list tuple
-                                user_vars_d: Dict[str, str] = {}
-                                for var_str in cli_val_for_attr or []:
-                                    if "=" not in var_str:
-                                        raise click.BadParameter(
-                                            f"invalid --var '{var_str}'. use k=v.",
-                                            param_hint="--var",
-                                        )
-                                    k, v = var_str.split("=", 1)
-                                    user_vars_d[k.strip()] = v
-                                config_data_for_init[pc_attr] = user_vars_d
-                            elif (
-                                pc_attr == "input_paths"
-                            ):  # cli_val_for_attr is input_paths tuple
-                                config_data_for_init[pc_attr] = (
-                                    list(cli_val_for_attr)
-                                    if cli_val_for_attr
-                                    else [Path(".")]
-                                )
-                            else:
-                                config_data_for_init[pc_attr] = cli_val_for_attr
+                    if (
+                        source_for_this_attr == click.core.ParameterSource.COMMANDLINE
+                    ):  # Corrected Enum
+                        current_value = cli_value
+                        log.debug(
+                            "value_from_cli_explicit",
+                            attr=pc_attr_name,
+                            value=current_value,
+                        )
+                    elif (
+                        cli_value is not None
+                        and source_for_this_attr == click.core.ParameterSource.DEFAULT
+                    ):
+                        # this means click provided its own default for an option the user didn't set.
+                        # if the current_value is still the hardcoded dataclass default,
+                        # it implies no file/profile config set it, so click's default can apply.
+                        dataclass_default_val = (
+                            field_def.default_factory()
+                            if field_def.default_factory is not MISSING
+                            else field_def.default
+                        )
+                        if current_value == dataclass_default_val:
+                            current_value = cli_value
                             log.debug(
-                                "cli_override_applied",
-                                config_key=pc_attr,
-                                value=config_data_for_init[pc_attr],
+                                "value_from_click_option_default",
+                                attr=pc_attr_name,
+                                value=current_value,
                             )
 
-            # Default input_paths if still empty and not stdin
-            if not config_data_for_init.get(
-                "input_paths"
-            ) and not config_data_for_init.get("read_from_stdin"):
-                config_data_for_init["input_paths"] = [Path(".")]
+                pc_init_kwargs[pc_attr_name] = current_value
 
-            # Create PromptConfig instance
-            final_effective_config = PromptConfig(**config_data_for_init)
-
+            # post-process specific args needing conversion
+            cli_user_vars = cli_params_from_click.get("user_vars_list")
             if (
-                final_effective_config.process_yaml_truncate_long_fields
-                and not PYYAML_AVAILABLE
+                ctx.get_parameter_source("user_vars_list")
+                == click.core.ParameterSource.COMMANDLINE
+                and cli_user_vars is not None
             ):
+                uv_dict: Dict[str, str] = {}
+                for v_str in cast(List[str], cli_user_vars):
+                    if "=" not in v_str:
+                        raise click.BadParameter(
+                            f"invalid --var '{v_str}'. use k=v.", param_hint="--var"
+                        )
+                    k, v = v_str.split("=", 1)
+                    uv_dict[k.strip()] = v
+                pc_init_kwargs["user_vars"] = uv_dict
+            elif pc_init_kwargs.get("user_vars") is None:
+                pc_init_kwargs["user_vars"] = {}
+
+            for enum_attr, enum_cls, enum_hard_default in [
+                ("preset_template", PresetTemplate, None),
+                ("output_format", OutputFormat, DEFAULT_OUTPUT_FORMAT),
+                ("sort_method", SortMethod, DEFAULT_SORT_METHOD),
+                ("show_tokens_format", TokenCountFormat, None),
+            ]:
+                val_to_convert = pc_init_kwargs.get(enum_attr)
+                if isinstance(val_to_convert, str):
+                    enum_member = enum_cls.from_string(val_to_convert)
+                    pc_init_kwargs[enum_attr] = (
+                        enum_member if enum_member else enum_hard_default
+                    )
+                    if enum_member is None:
+                        log.warning(
+                            "invalid_enum_str_using_default",
+                            attr=enum_attr,
+                            val=val_to_convert,
+                            default=enum_hard_default,
+                        )
+                elif (
+                    val_to_convert is None
+                    and enum_hard_default is not None
+                    and pc_init_kwargs.get(enum_attr) is None
+                ):
+                    pc_init_kwargs[enum_attr] = enum_hard_default
+
+            current_input_paths_val = pc_init_kwargs.get("input_paths")
+            if not current_input_paths_val and not pc_init_kwargs.get(
+                "read_from_stdin"
+            ):
+                pc_init_kwargs["input_paths"] = [Path(".")]
+            elif isinstance(current_input_paths_val, tuple):
+                pc_init_kwargs["input_paths"] = list(current_input_paths_val)
+
+            final_config = PromptConfig(**pc_init_kwargs)
+
+            if final_config.process_yaml_truncate_long_fields and not PYYAML_AVAILABLE:
                 click.echo(
-                    "warning: yaml truncation requested but pyyaml not installed. skipping this step.\n"
-                    "  install with: pip install llmfiles[yaml_tools]",
+                    "warning: yaml truncation requested but pyyaml not installed. skipping. "
+                    "install with: pip install llmfiles[yaml_tools]",
                     err=True,
                 )
 
-            _execute_main_prompt_generation_flow(final_effective_config)
+            _execute_main_prompt_generation_flow(final_config)
 
         except (click.ClickException, ConfigError, SmartPromptBuilderError) as e:
-            # use structlog for application errors, click.echo for user feedback
             log.error(
-                "cli_execution_error",
+                "cli_execution_error_known",
                 error_type=type(e).__name__,
                 error_message=str(e),
-                exc_info=log.getEffectiveLevel() <= logging.DEBUG,
-            )
+                exc_info=log.getEffectiveLevel() <= stdlib_logging.DEBUG,
+            )  # type: ignore
             if isinstance(e, click.ClickException):
-                e.show()  # click handles its own error display
+                e.show()
             else:
                 click.echo(f"error: {e}", err=True)
             sys.exit(1)
-        except Exception as e:  # catch-all for truly unexpected issues
+        except Exception as e:
             log.critical(
-                "unexpected_cli_error_critical", error_message=str(e), exc_info=True
+                "cli_execution_error_unexpected_critical",
+                error_message=str(e),
+                exc_info=True,
             )
-            click.echo(
-                f"unexpected error: {e}. please check logs or report this issue.",
-                err=True,
-            )
+            click.echo(f"unexpected error: {e}. please report this.", err=True)
             sys.exit(1)
-    # else: subcommand was invoked, click will handle its execution.
 
 def main_cli_entrypoint():
-    """main entry point for the llmfiles cli script, called by `pyproject.toml` [project.scripts]."""
-    # note: if actual subcommands (extensions) were to be loaded, it would happen here,
-    # before `main_cli_group()` is called. for the integrated yaml feature, this is not needed.
     main_cli_group(prog_name="llmfiles")
 
 if __name__ == '__main__':

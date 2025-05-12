@@ -11,7 +11,7 @@ from llmfiles.util import strip_utf8_bom, get_language_hint
 log = structlog.get_logger(__name__)  # module-level logger
 
 # --- optional pyyaml import for yaml processing ---
-pyyaml_available = False
+PYYAML_AVAILABLE = False
 yaml_module: Any = None  # placeholder for the imported 'yaml' module
 try:
     import yaml  # try to import the standard yaml library (pyyaml)

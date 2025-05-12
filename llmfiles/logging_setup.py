@@ -1,95 +1,111 @@
 # llmfiles/logging_setup.py
-"""centralized structlog configuration for the llmfiles application."""
-import logging
+import logging  # standard library logging
 import sys
 import structlog # for structured logging
 
 # these processors are applied sequentially to log entries.
 # order matters.
 SHARED_LOG_PROCESSORS = [
-    structlog.contextvars.merge_contextvars, # allows context-local logging variables
-    structlog.stdlib.add_logger_name,        # adds the name of the logger (e.g., 'llmfiles.cli')
-    structlog.stdlib.add_log_level,          # adds the log level (e.g., 'info', 'error')
-    structlog.stdlib.ExtraAdder(),           # allows adding extra fixed fields if needed
-    structlog.processors.stack_info_renderer,  # renders stack info for exceptions
-    structlog.dev.set_exc_info,              # ensures exception info is captured correctly
-    structlog.processors.format_exc_info,    # formats exception info into a string
-    structlog.processors.time_stamper(fmt="iso", utc=True), # adds utc iso timestamps
+    structlog.contextvars.merge_contextvars,
+    structlog.stdlib.add_logger_name,
+    structlog.stdlib.add_log_level,
+    structlog.stdlib.ExtraAdder(),
+    structlog.processors.StackInfoRenderer(),
+    structlog.dev.set_exc_info,
+    structlog.processors.format_exc_info,
+    structlog.processors.TimeStamper(fmt="iso", utc=True),
 ]
 
 def configure_logging(log_level_str: str = "warning", force_json_logs: bool = False):
     """
-    configures structlog for console-friendly or json output.
+    configures structlog for the application.
 
     args:
-        log_level_str: desired logging level ("debug", "info", "warning", "error").
-        force_json_logs: if true, output logs in json format, regardless of tty.
+        log_level_str: the desired logging level as a string (e.g., "info", "debug").
+        force_json_logs: if true, forces json output for logs, otherwise uses console-friendly.
     """
     log_level_int = getattr(logging, log_level_str.upper(), logging.WARNING)
 
-    # choose renderer based on whether output is to a tty or if json is forced.
-    # json logs are better for machine parsing (e.g., in production or ci).
-    # console logs are better for human readability during development.
-    if force_json_logs or not sys.stderr.isatty():
-        # for non-interactive environments or when json is forced.
-        final_processors = SHARED_LOG_PROCESSORS + [
-            structlog.processors.dict_tracebacks, # makes tracebacks json-friendly
-            structlog.processors.json_renderer(), # renders the log entry as a json string
+    final_structlog_processor: structlog.types.Processor
+    # define the foreign_pre_chain. these processors are applied to logs
+    # coming from the standard library logging system before they hit the
+    # final_structlog_processor.
+    # this ensures that stdlib logs also get structlog's enrichments.
+    stdlib_log_enrichment_processors = (
+        SHARED_LOG_PROCESSORS
+        + [
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,  # cleans up internal structlog data
         ]
-        formatter = structlog.stdlib.ProcessorFormatter.wrap_for_formatter(
-            # this processor prepares the log entry for the standard library handler.
-            # it's the last step before the standard library handler formats it (if it does).
-            # for jsonrenderer, the handler's formatter is usually ignored or minimal.
-            processor=structlog.processors.json_renderer(),
-            logger_factory=structlog.stdlib.LoggerFactory(), # use standard library loggers
-        )
-    else:
-        # for interactive console sessions (tty).
-        final_processors = SHARED_LOG_PROCESSORS + [
-            structlog.dev.console_renderer(colors=True), # pretty, colored output.
-        ]
-        formatter = structlog.stdlib.ProcessorFormatter.wrap_for_formatter(
-            # console_renderer does its own formatting, so the stdlib formatter is mostly a pass-through.
-            processor=structlog.dev.console_renderer(colors=True),
-            logger_factory=structlog.stdlib.LoggerFactory(),
+    )
+
+    if force_json_logs or not sys.stderr.isatty():  # use json if forced or not a tty
+        final_structlog_processor = structlog.processors.JSONRenderer()
+    else:  # console-friendly output
+        final_structlog_processor = structlog.dev.ConsoleRenderer(
+            colors=True, exception_formatter=structlog.dev.plain_traceback
         )
 
     # configure structlog itself.
+    # processors here are for logs created by `structlog.get_logger()`.
+    # `wrap_for_formatter` prepares it for a standard library handler.
     structlog.configure(
-        processors=final_processors,
-        logger_factory=structlog.stdlib.LoggerFactory(), # produces standard library loggers
-        wrapper_class=structlog.stdlib.BoundLogger,      # the logger instances returned by structlog.get_logger()
-        cache_logger_on_first_use=True,                  # optimization
+        processors=SHARED_LOG_PROCESSORS
+        + [  # applies to structlog-native logs
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+        # `processor` here is the default final processor for records from `foreign_pre_chain`
+        # if they don't get handled by a specific handler's formatter.
+        # however, we will set a specific formatter on our handler.
+    )
+
+    # create the stdlib handler's formatter using `ProcessorFormatter`.
+    # this formatter will use the `final_structlog_processor` (json or console) for rendering
+    # both structlog-native logs (after `wrap_for_formatter`) and stdlib logs (after `foreign_pre_chain`).
+    stdlib_handler_formatter = structlog.stdlib.ProcessorFormatter(
+        # the `processor` argument here is the one that does the actual final rendering.
+        processor=final_structlog_processor,
+        # `foreign_pre_chain` processes log records from non-structlog loggers
+        # (i.e., standard library loggers) before they hit the main `processor`.
+        foreign_pre_chain=stdlib_log_enrichment_processors,  # CORRECTLY USED HERE
     )
 
     # configure the root logger for the 'llmfiles' namespace.
-    # this ensures all loggers created under 'llmfiles' (e.g., llmfiles.cli, llmfiles.discovery)
-    # will inherit this configuration and level.
     app_root_logger = logging.getLogger("llmfiles")
     
     # clear any existing handlers to prevent duplicate logs if reconfigured.
     if app_root_logger.hasHandlers():
         app_root_logger.handlers.clear()
 
-    # add a standard library handler. structlog's processors will format the log record
-    # before it reaches this handler's formatter.
-    handler = logging.StreamHandler(sys.stderr) # log to stderr.
-    # the formatter on the handler is less critical when using structlog's stdlib.processorformatter,
-    # as structlog's processors do most of the work.
-    # a simple pass-through formatter or none might be used.
-    # however, `processorformatter.wrap_for_formatter` is designed to work with stdlib formatters.
-    handler.setFormatter(formatter) # use the structlog-wrapped formatter.
-    
+    # add a standard library handler, now using the structlog-aware formatter.
+    handler = logging.StreamHandler(sys.stderr)  # log to stderr.
+    handler.setFormatter(
+        stdlib_handler_formatter
+    )  # use the structlog-configured stdlib formatter.
+
     app_root_logger.addHandler(handler)
-    app_root_logger.setLevel(log_level_int) # set the effective log level.
+    app_root_logger.setLevel(
+        log_level_int
+    )  # set the effective log level for our app's namespace.
 
-    # disable propagation if you only want this specific logger to handle 'llmfiles' messages
-    # and not pass them up to the root logger of the python logging hierarchy.
-    # app_root_logger.propagate = False 
+    # optionally, configure the *root* python logger to also use this formatter
+    # if you want all logs from all libraries to be processed by structlog.
+    # this can be noisy but useful for debugging library issues.
+    # python_root_logger = logging.getLogger()
+    # if not any(isinstance(h.formatter, structlog.stdlib.ProcessorFormatter) for h in python_root_logger.handlers):
+    #     # only add if no structlog formatter already on root to avoid duplicates
+    #     root_handler = logging.StreamHandler(sys.stderr)
+    #     root_handler.setFormatter(stdlib_handler_formatter)
+    #     python_root_logger.addHandler(root_handler)
+    #     python_root_logger.setLevel(log_level_int) # or a different level for external libs
 
-    log = structlog.get_logger("llmfiles.logging_setup") # get a structlog logger for this module.
-    log.info(
+    slog = structlog.get_logger(
+        "llmfiles.logging_setup"
+    )  # get a structlog logger for this module.
+    slog.info(  # use the structlog logger for this confirmation.
         "logging configured.",
         log_level=log_level_str,
-        output_type="json" if force_json_logs or not sys.stderr.isatty() else "console"
+        output_type="json" if force_json_logs or not sys.stderr.isatty() else "console",
     )

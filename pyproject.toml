@@ -29,6 +29,7 @@ dependencies = [
     "rich>=13.0",         # to make things... rich? yes.
     "PyYAML>=5.0",        # For parsing YAML files and trunc'ing large data
     "structlog",          # Better logging outputs
+    "toml",               # For parsing our config .toml files
 ]
 
 [project.optional-dependencies]
