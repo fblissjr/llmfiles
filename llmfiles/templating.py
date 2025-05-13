@@ -6,8 +6,9 @@ and renders them with context from discovered files and git information.
 """
 import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
+import json
 import pybars  # type: ignore # handlebars templating engine
 import structlog  # for structured logging
 
@@ -271,9 +272,12 @@ def _build_tree_string(file_entries: List[Dict[str, Any]], config: PromptConfig)
     ) -> List[str]:
         output_lines: List[str] = []
         # sort items by name for consistent tree display.
+        item_names_to_display = [
+            name for name in node_dict_level if name not in ("_type", "_children")
+        ]
         sorted_item_names = sorted(
-            [name for name in node_dict_level if not name.startswith("_")]
-        )  # ignore internal keys
+            item_names_to_display, key=lambda s: s.lower()
+        )  # Sort case-insensitively
 
         for i, item_name in enumerate(sorted_item_names):
             item_data = node_dict_level[item_name]

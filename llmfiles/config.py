@@ -78,7 +78,6 @@ DEFAULT_ENCODING = "cl100k"
 
 @dataclass
 class PromptConfig:
-    # (all fields as previously defined)
     input_paths: List[Path] = field(default_factory=lambda: [Path(".")])
     read_from_stdin: bool = False
     nul_separated: bool = False
