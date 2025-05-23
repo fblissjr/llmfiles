@@ -21,30 +21,31 @@ USER_CONFIG_FILE = USER_CONFIG_DIR / "config.toml"
 # format: "config_file_key": "PromptConfig_attribute_name"
 CONFIG_TO_PROMPTCONFIG_MAP: Dict[str, str] = {
     "input_paths": "input_paths",
-    "include": "include_patterns", # 'include' in toml maps to 'include_patterns'
+    "include": "include_patterns",
     "exclude": "exclude_patterns",
+    "include_from_files": "include_from_files",  # New mapping
+    "exclude_from_files": "exclude_from_files",  # New mapping
     "no_ignore": "no_ignore",
     "hidden": "hidden",
     "follow_symlinks": "follow_symlinks",
-    "template": "template_path", # 'template' in toml maps to 'template_path'
-    "preset": "preset_template", # 'preset' in toml maps to 'preset_template' (enum name)
-    "vars": "user_vars",         # 'vars' in toml maps to 'user_vars'
-    "output_format": "output_format", # enum name
+    "template": "template_path",
+    "preset": "preset_template",
+    "vars": "user_vars",
+    "output_format": "output_format",
     "line_numbers": "line_numbers",
     "no_codeblock": "no_codeblock",
     "absolute_paths": "absolute_paths",
     "yaml_truncate_long_fields": "process_yaml_truncate_long_fields",
     "yaml_placeholder": "yaml_truncate_placeholder",
     "yaml_max_len": "yaml_truncate_content_max_len",
-    "sort": "sort_method", # enum name
+    "sort": "sort_method",
     "git_diff": "diff",
     "git_diff_branch": "git_diff_branch",
     "git_log_branch": "git_log_branch",
     "encoding": "encoding",
-    "show_tokens_format": "show_tokens_format", # enum name for json/stderr output
+    "show_tokens_format": "show_tokens_format",
     "output_file": "output_file",
     "clipboard": "clipboard",
-    # console specific output preferences
     "console_show_tree": "console_show_tree",
     "console_show_summary": "console_show_summary",
     "console_show_token_count": "console_show_token_count",
@@ -75,38 +76,70 @@ def get_merged_config_defaults() -> Dict[str, Any]:
     """
     loads configurations from user and project files, merging them.
     project-specific files (cwd) override user-global files.
-    returns a dictionary directly usable for `PromptConfig` kwargs after mapping keys.
+    returns a dictionary of raw TOML keys and values.
     """
     merged_settings: Dict[str, Any] = {}
 
     # 1. load user-global configuration (lowest precedence)
     if USER_CONFIG_FILE.is_file():
         log.info("loading user config.", path=str(USER_CONFIG_FILE))
-        merged_settings.update(_load_settings_from_toml(USER_CONFIG_FILE))
+        user_loaded_settings = _load_settings_from_toml(USER_CONFIG_FILE)
+        merged_settings.update(user_loaded_settings)
 
     # 2. load project-specific configuration (highest precedence among config files)
-    #    searches for config files in the current working directory.
-    #    pyproject.toml is often at project root, .llmfiles.toml can be too.
-    project_config_loaded = False
+    project_config_loaded_from_file: Optional[Path] = None
     for filename in PROJECT_CONFIG_FILENAMES:
         project_file = Path.cwd() / filename
         if project_file.is_file():
             log.info("loading project config.", path=str(project_file))
             project_settings = _load_settings_from_toml(project_file)
-            merged_settings.update(project_settings) # project settings override user settings
-            if project_settings: # if a project config actually provided settings
-                 project_config_loaded = True
-                 log.debug("project config applied.", file=str(project_file), settings_keys=list(project_settings.keys()))
-            # if you want to load only the first project config found: break
-    
-    if not merged_settings and not project_config_loaded:
+            if project_settings:
+                # Merge profiles carefully: project profiles override user profiles by name.
+                if "profiles" in merged_settings and "profiles" in project_settings:
+                    # Ensure both are dicts before attempting to update
+                    if isinstance(merged_settings.get("profiles"), dict) and isinstance(
+                        project_settings.get("profiles"), dict
+                    ):
+                        # Mypy/pyright might complain about potential None if .get() was used without check,
+                        # but logic implies they are dicts here.
+                        merged_settings["profiles"].update(project_settings["profiles"])  # type: ignore
+
+                        # Remove 'profiles' from project_settings to avoid overwriting
+                        # the merged 'profiles' dict during the general update below.
+                        del project_settings["profiles"]
+                    elif isinstance(project_settings.get("profiles"), dict):
+                        # If user_settings didn't have profiles or it wasn't a dict,
+                        # just use the project's profiles.
+                        merged_settings["profiles"] = project_settings["profiles"]
+                        if (
+                            "profiles" in project_settings
+                        ):  # Should exist if we are in this branch
+                            del project_settings["profiles"]
+
+                merged_settings.update(project_settings)
+                project_config_loaded_from_file = project_file
+                log.debug(
+                    "project config applied.",
+                    file=str(project_file),
+                    settings_keys=list(project_settings.keys()),
+                )
+                break  # Load only the first project config file found
+
+    if (
+        not merged_settings and not project_config_loaded_from_file
+    ):  # Corrected condition
         log.debug("no user or project configuration files found or loaded.")
-    
-    # map loaded setting keys to PromptConfig attribute names
-    final_defaults_for_promptconfig: Dict[str, Any] = {}
-    for conf_key, pc_attr_name in CONFIG_TO_PROMPTCONFIG_MAP.items():
-        if conf_key in merged_settings:
-            final_defaults_for_promptconfig[pc_attr_name] = merged_settings[conf_key]
-            
-    log.debug("merged config defaults for promptconfig.", defaults=final_defaults_for_promptconfig)
-    return final_defaults_for_promptconfig
+    elif project_config_loaded_from_file:
+        log.info(
+            "final config source after merge includes project file.",
+            project_file=str(project_config_loaded_from_file),
+        )
+    elif USER_CONFIG_FILE.is_file() and merged_settings:
+        log.info(
+            "final config source is user global file.", user_file=str(USER_CONFIG_FILE)
+        )
+
+    log.debug(
+        "merged config defaults from files (raw TOML keys).", defaults=merged_settings
+    )
+    return merged_settings

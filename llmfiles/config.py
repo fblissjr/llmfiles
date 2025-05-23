@@ -1,24 +1,30 @@
 # llmfiles/config.py
-"""configuration dataclasses and enums for llmfiles."""
+"""Configuration dataclasses and enums for llmfiles."""
 
 import structlog
-from dataclasses import dataclass, field, fields as dataclass_fields, MISSING
+from dataclasses import (
+    dataclass,
+    field,
+)  # Removed MISSING as it wasn't used in the final PromptConfig
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Set, Any
+from typing import List, Optional, Tuple, Dict, Any
 
-from llmfiles.exceptions import ConfigError
+# from llmfiles.exceptions import ConfigError # Not strictly needed if not raising ConfigError here
 
 log = structlog.get_logger(__name__)
 
-# --- enums for configuration choices ---
+
 class SortMethod(Enum):
+    """Defines available methods for sorting discovered files."""
+
     NAME_ASC, NAME_DESC, DATE_ASC, DATE_DESC = (
         "name_asc",
         "name_desc",
         "date_asc",
         "date_desc",
     )
+
     @classmethod
     def from_string(cls, s: Optional[str]) -> Optional["SortMethod"]:
         if not s:
@@ -29,8 +35,12 @@ class SortMethod(Enum):
             log.warning("invalid_sort_method_string", input_string=s)
             return None
 
+
 class OutputFormat(Enum):
+    """Defines supported output formats for the generated prompt."""
+
     MARKDOWN, XML, JSON = "markdown", "xml", "json"
+
     @classmethod
     def from_string(cls, s: Optional[str]) -> Optional["OutputFormat"]:
         if not s:
@@ -41,8 +51,12 @@ class OutputFormat(Enum):
             log.warning("invalid_output_format_string", input_string=s)
             return None
 
+
 class TokenCountFormat(Enum):
+    """Defines display formats for token counts."""
+
     HUMAN, RAW = "human", "raw"
+
     @classmethod
     def from_string(cls, s: Optional[str]) -> Optional["TokenCountFormat"]:
         if not s:
@@ -53,8 +67,12 @@ class TokenCountFormat(Enum):
             log.warning("invalid_token_count_format_string", input_string=s)
             return None
 
+
 class PresetTemplate(Enum):
+    """Defines built-in template presets."""
+
     DEFAULT, CLAUDE_OPTIMAL, GENERIC_XML = "default", "claude-optimal", "generic-xml"
+
     @classmethod
     def from_string(cls, s: Optional[str]) -> Optional["PresetTemplate"]:
         if not s:
@@ -66,6 +84,7 @@ class PresetTemplate(Enum):
             return None
 
 
+# Default values for various configuration options
 DEFAULT_YAML_TRUNCATION_PLACEHOLDER = "<content truncated due to length>"
 DEFAULT_YAML_TRUNCATE_CONTENT_MAX_LEN = 500
 DEFAULT_CONSOLE_SHOW_TREE = True
@@ -78,67 +97,85 @@ DEFAULT_ENCODING = "cl100k"
 
 @dataclass
 class PromptConfig:
+    """Holds all configuration parameters for generating the prompt."""
     input_paths: List[Path] = field(default_factory=lambda: [Path(".")])
     read_from_stdin: bool = False
-    nul_separated: bool = False
+    nul_separated: bool = False  # For stdin processing
     include_patterns: List[str] = field(default_factory=list)
     exclude_patterns: List[str] = field(default_factory=list)
-    include_priority: bool = False
-    no_ignore: bool = False
-    hidden: bool = False
-    follow_symlinks: bool = False
-    template_path: Optional[Path] = None
-    preset_template: Optional[PresetTemplate] = None
-    user_vars: Dict[str, str] = field(default_factory=dict)
-    output_format: OutputFormat = DEFAULT_OUTPUT_FORMAT
-    line_numbers: bool = False
-    no_codeblock: bool = False
-    absolute_paths: bool = False
-    process_yaml_truncate_long_fields: bool = False
+    include_from_files: List[Path] = field(
+        default_factory=list
+    )  # Files containing include patterns
+    exclude_from_files: List[Path] = field(
+        default_factory=list
+    )  # Files containing exclude patterns
+    include_priority: bool = (
+        False  # If true, include patterns override exclude patterns
+    )
+    no_ignore: bool = False  # Disables .gitignore file processing
+    hidden: bool = False  # Includes hidden files and directories
+    follow_symlinks: bool = False  # Follows symbolic links during discovery
+    template_path: Optional[Path] = None  # Path to a custom handlebars template
+    preset_template: Optional[PresetTemplate] = (
+        None  # Name of a built-in template preset
+    )
+    user_vars: Dict[str, str] = field(
+        default_factory=dict
+    )  # User-defined variables for templates
+    output_format: OutputFormat = (
+        DEFAULT_OUTPUT_FORMAT  # Default output format if no template/preset
+    )
+    line_numbers: bool = False  # Prepend line numbers to file content
+    no_codeblock: bool = False  # Omit markdown code blocks around file content
+    absolute_paths: bool = False  # Use absolute paths for files in the output list
+    show_absolute_project_path: bool = (
+        False  # Show full absolute path for project root in header
+    )
+    process_yaml_truncate_long_fields: bool = (
+        False  # Enable/disable truncation of long YAML fields
+    )
     yaml_truncate_placeholder: str = DEFAULT_YAML_TRUNCATION_PLACEHOLDER
     yaml_truncate_content_max_len: int = DEFAULT_YAML_TRUNCATE_CONTENT_MAX_LEN
-    sort_method: SortMethod = DEFAULT_SORT_METHOD
-    diff: bool = False
-    git_diff_branch: Optional[Tuple[str, str]] = None
-    git_log_branch: Optional[Tuple[str, str]] = None
-    encoding: str = DEFAULT_ENCODING
-    show_tokens_format: Optional[TokenCountFormat] = None
-    output_file: Optional[Path] = None
-    clipboard: bool = False
-    console_show_tree: bool = DEFAULT_CONSOLE_SHOW_TREE
-    console_show_summary: bool = DEFAULT_CONSOLE_SHOW_SUMMARY
-    console_show_token_count: bool = DEFAULT_CONSOLE_SHOW_TOKEN_COUNT
-    resolved_input_paths: List[Path] = field(default_factory=list, init=False)
+    sort_method: SortMethod = DEFAULT_SORT_METHOD  # Method for sorting included files
+    diff: bool = False  # Include staged git diff
+    git_diff_branch: Optional[Tuple[str, str]] = (
+        None  # (base, compare) for git diff between branches
+    )
+    git_log_branch: Optional[Tuple[str, str]] = (
+        None  # (base, compare) for git log between branches
+    )
+    encoding: str = DEFAULT_ENCODING  # Tiktoken encoding for token counting
+    show_tokens_format: Optional[TokenCountFormat] = (
+        None  # Format for displaying token count on stderr (main output)
+    )
+    output_file: Optional[Path] = None  # Path to write the generated prompt to
+    clipboard: bool = False  # Copy the generated prompt to the clipboard
+    console_show_tree: bool = (
+        DEFAULT_CONSOLE_SHOW_TREE  # Show directory tree on console
+    )
+    console_show_summary: bool = (
+        DEFAULT_CONSOLE_SHOW_SUMMARY  # Show file count summary on console
+    )
+    console_show_token_count: bool = (
+        DEFAULT_CONSOLE_SHOW_TOKEN_COUNT  # Show token count on console (stderr)
+    )
+
+    save_profile_name: Optional[str] = field(
+        default=None, init=True
+    )  # Profile name for --save feature
+
+    # Internal state, not typically set by user through config files directly
+    resolved_input_paths: List[Path] = field(
+        default_factory=list, init=False
+    )  # Stores resolved absolute seed paths
     base_dir: Path = field(
         init=False
-    )  # this is the root for relative path calculations for filters
+    )  # Root directory for relative path calculations and discovery
 
     def __post_init__(self):
-        """
-        finalizes `base_dir`. this directory is considered the "project root"
-        for the purpose of applying glob patterns and discovering .gitignore files
-        that are at this root or above it (up to a logical project boundary if discernible,
-        or filesystem root in worst case for items outside typical project structure).
-        """
-        # `input_paths` are as provided by user (cli or config).
-        # they might be relative or absolute.
-        # `base_dir` should be an absolute path that serves as the reference
-        # for all relative path operations for filtering (include, exclude, gitignore).
-
-        # strategy:
-        # 1. if input_paths are all absolute and share a common ancestor that is a git repo root,
-        #    or some other project marker, that could be base_dir. (complex to implement robustly)
-        # 2. simpler: use current working directory (cwd) as the primary `base_dir`.
-        #    this means `.gitignore` in cwd and its parents will be considered broadly.
-        #    include/exclude patterns are then relative to this `base_dir`.
-        #    `resolved_input_paths` (from discovery) will be absolute.
-        #    when checking an item, its path relative to this `base_dir` is used for filtering.
-
+        """Performs initial setup after dataclass instantiation."""
         self.base_dir = Path.cwd().resolve()
-        log.info("base_dir_set_to_cwd_for_filtering_scope", path=str(self.base_dir))
-
-        # `self.input_paths` (from user) are resolved to absolute paths later in `_determine_initial_seed_paths`.
-        # `config.resolved_input_paths` will store these fully resolved, existing seed paths.
+        log.info("PromptConfig.base_dir_initialized", path=str(self.base_dir))
 
         if self.template_path and self.preset_template:
             log.warning(
@@ -147,4 +184,8 @@ class PromptConfig:
                 preset=self.preset_template.value if self.preset_template else "none",
             )
 
-        log.debug("promptconfig_finalized_initial", base_dir=str(self.base_dir))
+        # Corrected log key here from previous version in my head
+        log.debug(
+            "PromptConfig_finalized",
+            show_absolute_project_path_setting=self.show_absolute_project_path,
+        )

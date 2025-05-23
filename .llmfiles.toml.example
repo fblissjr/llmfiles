@@ -2,8 +2,8 @@
 input_paths = [ "./random_code",]
 include = []
 exclude = []
-include_from_files = [ "./patterns/python_includes.txt",]
-exclude_from_files = [ "./patterns/core_excludes.txt",]
+include_from_files = [ "./patternspython_includes.txt",]
+exclude_from_files = [ "/private/var/folders/y1/fyj680bn67jdgknqdjjq821w0000gn/T/pytest-of-fredbliss/pytest-3/test_save_profile_with_pattern0/patterns/core_excludes.txt",]
 vars = []
 output_format = "xml"
 
