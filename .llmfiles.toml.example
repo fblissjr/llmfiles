@@ -1,0 +1,17 @@
+[profiles.profile_with_files]
+input_paths = [ "./random_code",]
+include = []
+exclude = []
+include_from_files = [ "./patterns/python_includes.txt",]
+exclude_from_files = [ "./patterns/core_excludes.txt",]
+vars = []
+output_format = "xml"
+
+[profiles.minimal_profile]
+input_paths = [ "./random-code",]
+include = []
+exclude = []
+include_from_files = []
+exclude_from_files = []
+vars = []
+no_codeblock = true
