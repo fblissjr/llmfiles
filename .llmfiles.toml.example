@@ -1,17 +1,110 @@
-[profiles.profile_with_files]
-input_paths = [ "./random_code",]
-include = []
-exclude = []
-include_from_files = [ "./patternspython_includes.txt",]
-exclude_from_files = [ "/private/var/folders/y1/fyj680bn67jdgknqdjjq821w0000gn/T/pytest-of-fredbliss/pytest-3/test_save_profile_with_pattern0/patterns/core_excludes.txt",]
-vars = []
-output_format = "xml"
+# .llmfiles.toml.example
+# Example configuration file for llmfiles.
+# Rename to .llmfiles.toml or llmfiles.toml in your project root,
+# or place in ~/.config/llmfiles/config.toml for global settings.
 
-[profiles.minimal_profile]
-input_paths = [ "./random-code",]
-include = []
-exclude = []
-include_from_files = []
-exclude_from_files = []
-vars = []
-no_codeblock = true
+# --- Global Defaults ---
+# These settings apply unless overridden by a profile or CLI arguments.
+# TOML keys here generally match PromptConfig attribute names (see CONFIG_KEY_TO_PROMPTCONFIG_ATTR_MAP in config/loader.py).
+
+# display_project_header_path_fully = false # Old key, new is:
+show_absolute_project_path = false # Default: shows only project name in header
+chunk_strategy = "file"            # Default: "file", "python_structure"
+output_format = "markdown"         # Default output format
+line_numbers = false               # Default: no line numbers
+sort_method = "name_asc"           # Default sorting
+encoding = "cl100k"                # Default for token counting
+
+# Console output preferences
+console_show_tree = true
+console_show_summary = true
+console_show_token_count = false   # Default is false, set to true to always show on console
+
+# --- Profiles ---
+# Define reusable sets of options under the [profiles] table.
+
+[profiles.detailed_python_review]
+description = "For Python code review: structure chunking, git diff, line numbers."
+chunk_strategy = "python_structure" # Chunk .py files by functions/classes
+include_patterns = ["**/*.py"]
+exclude_patterns = [
+    "**/tests/**",
+    "**/__pycache__/**",
+    "**/migrations/**",
+    "setup.py"
+]
+line_numbers = true
+git_diff = true # Include staged git changes
+show_absolute_project_path = true # Show full project path in header
+console_show_tokens = true # Show token estimate on console for this profile
+
+[profiles.project_overview_docs]
+description = "Get all Markdown documentation and high-level Python module structure."
+# Assumes pattern files are relative to this TOML file or fully pathed.
+# Create these files in your project, e.g., in a .llmfiles_patterns/ directory.
+include_from_files = [".llmfiles_patterns/markdown_docs.txt"] # e.g., contains "**/*.md"
+# Could also include Python files chunked by structure:
+# include_patterns = ["**/*.py"] 
+# chunk_strategy = "python_structure" 
+output_file = "project_docs_overview.md"
+no_codeblock = false # Ensure code blocks for readability
+
+[profiles.minimal_output_for_claude]
+description = "Minimal text, specific files, optimized for Claude XML."
+preset_template = "claude-optimal" # Uses the Claude-specific XML template
+include_patterns = ["src/core/**/*.py", "src/api/public.py"]
+no_ignore = true # Example: ignore .gitignore for this profile
+line_numbers = false
+show_absolute_project_path = false
+
+[profiles.current_changes_summary]
+description = "Show only the staged git diff and commit log for recent changes."
+# No file inclusion patterns needed if only focusing on git.
+# input_paths = [] # Explicitly no file system paths
+git_diff = true
+git_log_branch = ["main", "HEAD"] # Log of current branch against main
+output_format = "markdown" # Keep it simple for diffs/logs
+chunk_strategy = "file" # Not relevant if no files included
+
+[profiles.save_example_profile]
+# This profile shows how various options would look if saved by `llmfiles --save ...`
+# It's more for illustration of saved values.
+description = "Example of a fully specified profile."
+input_paths = ["./src", "./README.md"]
+include_patterns = ["**/*.py"]
+exclude_patterns = ["**/ignored/**"]
+include_from_files = ["./.llmfiles_patterns/extra_includes.txt"]
+exclude_from_files = [] # Explicitly empty
+include_priority = true
+no_ignore = false
+hidden = true
+follow_symlinks = true
+chunk_strategy = "python_structure"
+template_path = "custom_templates/my_prompt.hbs"
+# preset_template = null # Cannot set null directly, omit if no preset
+user_vars = { project_name = "AwesomeUtil", version = "1.2.3" }
+output_format = "markdown"
+line_numbers = true
+no_codeblock = false
+absolute_paths = true
+show_absolute_project_path = true
+diff = true
+git_diff_branch = ["develop", "feature/new-thing"]
+git_log_branch = ["develop", "feature/new-thing"]
+encoding = "cl100k"
+show_tokens_format = "human"
+output_file = "awesome_prompt.md"
+clipboard = false
+sort_method = "date_desc"
+console_show_tree = true
+console_show_summary = true
+console_show_token_count = true
+
+# --- Example Pattern Files referenced above (you would create these) ---
+# File: .llmfiles_patterns/markdown_docs.txt
+# **/*.md
+# docs/**/*.mdx
+
+# File: .llmfiles_patterns/extra_includes.txt
+# utils/**/*.py
+# configs/*.json
