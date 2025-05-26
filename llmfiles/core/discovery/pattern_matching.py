@@ -13,6 +13,7 @@ from llmfiles.exceptions import DiscoveryError # For error reporting
 
 log = structlog.get_logger(__name__)
 
+
 def load_gitignore_patterns_from_file(gitignore_file_path: Path) -> Optional[pathspec.PathSpec]:
     """Loads and compiles .gitignore patterns from a specific .gitignore file."""
     if not gitignore_file_path.is_file():
@@ -47,44 +48,98 @@ def is_path_hidden(path_relative_to_root: Path, config: PromptConfig) -> bool:
     return any(part.startswith(".") and part not in (".", "..") for part in path_relative_to_root.parts)
 
 def is_path_gitignored(
-    absolute_path_item: Path, 
-    config: PromptConfig, 
-    gitignore_specs_cache: Dict[Path, Optional[pathspec.PathSpec]]
+    absolute_path_item: Path,
+    config: PromptConfig,
+    gitignore_specs_cache: Dict[
+        Path, Optional[pathspec.PathSpec]
+    ],  # Type hint for pathspec.PathSpec
 ) -> bool:
     """
     Checks if an item is ignored by any relevant .gitignore files.
-    Paths are checked from the item's directory up to config.base_dir.
+    Traverses from item's parent directory upwards.
+    Uses .as_posix() for paths given to pathspec for robustness.
     """
     if config.no_ignore:
         return False
 
-    # Traverse from item's parent directory upwards to config.base_dir
     current_dir_to_check = absolute_path_item.parent
 
+    log.debug(
+        "is_path_gitignored_check_started",
+        item_abs=str(absolute_path_item),
+        initial_check_dir=str(current_dir_to_check),
+        config_base_dir=str(config.base_dir),
+    )
+
+    # The loop traverses upwards. For a file /A/B/C/file.txt and base_dir /A/B:
+    # It will check C/.gitignore, then B/.gitignore.
+    # If base_dir is /A/D (sibling), and item is /A/B/C/file.txt, this loop might not behave as expected
+    # if it strictly stops at config.base_dir. A git-aware root finding is better for projects.
+    # For now, it traverses up to the filesystem root, which will find all parent .gitignores.
     while True:
+        log.debug(
+            "is_path_gitignored_checking_dir_for_gitignore",
+            dir_to_check=str(current_dir_to_check),
+        )
+
         if current_dir_to_check not in gitignore_specs_cache:
-            gitignore_specs_cache[current_dir_to_check] = load_gitignore_patterns_from_file(
-                current_dir_to_check / ".gitignore"
-            )
-        
+            gitignore_file = current_dir_to_check / ".gitignore"
+            # log.debug("is_path_gitignored_attempt_load_gitignore", gitignore_path=str(gitignore_file)) # Redundant with load func log
+            gitignore_specs_cache[current_dir_to_check] = (
+                load_gitignore_patterns_from_file(gitignore_file)
+            )  # Uses function from this module
+
         spec = gitignore_specs_cache[current_dir_to_check]
         if spec:
-            # pathspec matches paths relative to the directory containing the .gitignore
-            path_relative_to_gitignore = absolute_path_item.relative_to(current_dir_to_check)
-            if spec.match_file(str(path_relative_to_gitignore)):
-                log.debug("item_matched_gitignore_rule", item_path=str(absolute_path_item), 
-                          gitignore_file=str(current_dir_to_check / ".gitignore"))
-                return True # Ignored
+            try:
+                # pathspec expects paths relative to the directory containing the .gitignore file.
+                path_relative_to_gitignore_dir = absolute_path_item.relative_to(
+                    current_dir_to_check
+                )
+                # Ensure POSIX-style path strings for pathspec, which is generally more robust.
+                path_str_for_match = path_relative_to_gitignore_dir.as_posix()
 
-        # Stop conditions for traversal
-        if current_dir_to_check == config.base_dir: break
-        if current_dir_to_check.parent == current_dir_to_check: break # Filesystem root
-        if not config.base_dir.is_relative_to(current_dir_to_check.parent): # optimization for general case
-            if not str(config.base_dir).startswith(str(current_dir_to_check.parent)):
-                 break
+                log.debug(
+                    "is_path_gitignored_matching_path",
+                    path_to_match=path_str_for_match,
+                    against_gitignore_in=str(current_dir_to_check),
+                )
 
+                if spec.match_file(path_str_for_match):
+                    log.info(
+                        "is_path_gitignored_ITEM_IGNORED",
+                        item_path=str(absolute_path_item),
+                        matched_by_gitignore_in=str(
+                            current_dir_to_check / ".gitignore"
+                        ),
+                    )
+                    return True  # Item is ignored by this .gitignore file
+            except ValueError:
+                # This occurs if current_dir_to_check is not an ancestor of absolute_path_item.
+                # This should not happen if the upward traversal logic is correct relative to path roots.
+                log.warning(
+                    "is_path_gitignored_value_error_on_relative_to",
+                    item=str(absolute_path_item),
+                    gitignore_dir=str(current_dir_to_check),
+                    detail="This implies an issue with traversal logic or path structures.",
+                )
 
-        current_dir_to_check = current_dir_to_check.parent
+        # Stop conditions for upward traversal
+        if (
+            current_dir_to_check.parent == current_dir_to_check
+        ):  # Reached filesystem root
+            log.debug(
+                "is_path_gitignored_reached_filesystem_root",
+                last_dir_checked=str(current_dir_to_check),
+            )
+            break
+
+        current_dir_to_check = current_dir_to_check.parent  # Move to parent directory
+
+    log.debug(
+        "is_path_gitignored_no_matching_rule_item_not_ignored",
+        item_path=str(absolute_path_item),
+    )
     return False
 
 def check_glob_match_rules(
