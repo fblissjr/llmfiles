@@ -1,5 +1,5 @@
 # llmfiles
-yet another code & files to llm-optimized prompt input format. `llmfiles` automates the annoying parts of gathering files, directories (recursively), git context - and then formats it all into a single markdown / text file suitable for large language models. you can basically use this to manually provide the context you want at the granularity you want. you could also use this as a utility within MCP servers to provide context more dynamically. this might be where this project goes in the future. likely to integrate tree-sitter into it as well.
+yet another code & files to llm-optimized prompt input format. `llmfiles` automates the annoying parts of gathering files, directories (recursively), git context - and then formats it all into a single markdown / text file suitable for large language models. you can basically use this to manually provide the context you want at the granularity you want. you could also use this as a utility within MCP servers to provide context more dynamically. this might be where this project goes in the future. --likely to integrate-- integrated tree-sitter into it as well.
 
 ## features
 -   **flexible file selection:** 
