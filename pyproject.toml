@@ -1,62 +1,29 @@
 [project]
 name = "llmfiles"
-version = "0.5.0" # Consider incrementing version due to significant refactor and new features
-description = "Build LLM prompts from files, codebases, git context, with structure-aware chunking."
+version = "0.6.0"
+description = "build llm prompts from files, codebases, with structure-aware chunking."
 readme = "README.md"
-requires-python = ">=3.11" 
-license = { text = "Apache-2.0" }
-authors = [
-    { name = "Fred Bliss"}, 
-]
-classifiers = [ 
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "License :: OSI Approved :: Apache Software License",
-    "Operating System :: OS Independent",
-    "Topic :: Software Development :: Build Tools",
-    "Topic :: Utilities",
-    "Environment :: Console",
-    "Intended Audience :: Developers",
-]
+requires-python = ">=3.11"
+license = { text = "apache-2.0" }
+authors = [{ name = "fred bliss" }]
 dependencies = [
     "click>=8.0",
-    "click-option-group>=0.5.6",
     "pathspec>=0.11",
-    "pybars3>=0.9",
-    "tiktoken>=0.5",
-    "pyperclip>=1.8",
     "rich>=13.0",
     "structlog",
-    "toml",
     "tree-sitter>=0.21.3",
-    "tree-sitter-language-pack"
+    "tree-sitter-language-pack",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=7.0", 
-    "pytest-cov", 
-    "mypy", 
-    "types-toml", 
-    "ruff"
-]
+dev = ["pytest>=7.0", "pytest-cov", "mypy", "types-toml", "ruff"]
 
 [project.scripts]
 llmfiles = "llmfiles.main:entrypoint"
-
-[project.urls]
-homepage = "https://github.com/fblissjr/llmfiles"
-repository = "https://github.com/fblissjr/llmfiles"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["llmfiles"] 
-
-[tool.pytest.ini_options]
-pythonpath = ["."] # Add 'src' if using a src-layout and tests are outside src, e.g., ["src", "."]
-addopts = "-v --cov=llmfiles --cov-report=term-missing"
+packages = ["llmfiles"]
