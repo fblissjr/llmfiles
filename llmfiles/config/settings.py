@@ -21,13 +21,30 @@ class ChunkStrategy(Enum):
             log.warning("invalid_chunk_strategy_string", input_string=s)
             return None
 
+class ExternalDepsStrategy(Enum):
+    # defines how to handle external dependencies.
+    IGNORE = "ignore"
+    METADATA = "metadata"
+
+    @classmethod
+    def from_string(cls, s: Optional[str]) -> "ExternalDepsStrategy":
+        if not s:
+            return cls.IGNORE
+        try:
+            return cls(s.lower())
+        except ValueError:
+            log.warning("invalid_external_deps_strategy", input_string=s)
+            return cls.IGNORE
+
 @dataclass
 class PromptConfig:
     # holds all configuration parameters for a single run.
     input_paths: List[Path] = field(default_factory=list)
     include_patterns: List[str] = field(default_factory=list)
     exclude_patterns: List[str] = field(default_factory=list)
+    grep_content_pattern: Optional[str] = None
     chunk_strategy: ChunkStrategy = ChunkStrategy.STRUCTURE
+    external_deps_strategy: ExternalDepsStrategy = ExternalDepsStrategy.IGNORE
     no_ignore: bool = False
     hidden: bool = False
     follow_symlinks: bool = False

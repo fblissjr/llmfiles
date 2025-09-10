@@ -84,3 +84,18 @@ def extract_python_elements(file_path: Path, project_root: Path, content_bytes: 
 
     log.debug("extracted_python_elements", file=rel_path, count=len(elements))
     return elements
+
+def extract_python_imports(content_bytes: bytes) -> List[str]:
+    # parses python code and extracts all unique import module names.
+    imports = set()
+    ast = ts.parse_code_to_ast(content_bytes, LANG)
+    if not ast:
+        return []
+
+    import_captures = ts.run_query("imports", LANG, ast)
+    for node, _ in import_captures:
+        import_text = ts.get_node_text(node, content_bytes)
+        imports.add(import_text)
+
+    log.debug("extracted_python_imports", count=len(imports))
+    return sorted(list(imports))

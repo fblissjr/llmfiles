@@ -6,7 +6,7 @@ import click
 import structlog
 
 from llmfiles import __version__ as app_version
-from llmfiles.config.settings import PromptConfig, ChunkStrategy
+from llmfiles.config.settings import PromptConfig, ChunkStrategy, ExternalDepsStrategy
 from llmfiles.logging_setup import configure_logging
 from llmfiles.core.pipeline import PromptGenerator
 from llmfiles.core.output import write_to_file, write_to_stdout
@@ -41,10 +41,22 @@ def _print_summary_to_console(included_files: List[str]):
     help="glob pattern for files to exclude. can be used multiple times."
 )
 @click.option(
+    "--grep-content", "grep_content_pattern",
+    type=str,
+    default=None,
+    help="search file contents for a pattern and include matching files as seeds for dependency resolution."
+)
+@click.option(
     "--chunk-strategy",
     type=click.Choice([cs.value for cs in ChunkStrategy]),
     default=ChunkStrategy.STRUCTURE.value,
     help="strategy for chunking files. 'structure' (default) uses ast parsing for supported languages. 'file' treats each file as a single chunk."
+)
+@click.option(
+    "--external-deps", "external_deps_strategy",
+    type=click.Choice([es.value for es in ExternalDepsStrategy]),
+    default=ExternalDepsStrategy.IGNORE.value,
+    help="strategy for handling external dependencies: 'ignore' or 'metadata'."
 )
 @click.option(
     "--no-ignore",
@@ -114,6 +126,7 @@ def main_cli_group(paths, verbose, **kwargs):
         kwargs["exclude_patterns"] = list(kwargs["exclude_patterns"])
 
         kwargs["chunk_strategy"] = ChunkStrategy.from_string(kwargs["chunk_strategy"])
+        kwargs["external_deps_strategy"] = ExternalDepsStrategy.from_string(kwargs["external_deps_strategy"])
         kwargs["input_paths"] = list(paths)
 
         config = PromptConfig(**kwargs)
