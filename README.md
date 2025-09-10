@@ -6,6 +6,8 @@ it moves beyond simple file concatenation by using tree-sitter to parse code int
 
 ## features
 
+-   **recursive dependency resolution:** for python, automatically finds and includes files that are imported by your seed files, providing much richer context.
+-   **content-based file search:** use the `--grep-content` flag to select files based on a text pattern in their content, not just their file path.
 -   **intelligent code chunking:** automatically parses supported languages (python, javascript) into logical units like functions and classes.
 -   **fallback to file chunking:** gracefully handles unsupported file types by treating them as a single element.
 -   **`.gitignore` aware:** respects your project's `.gitignore` files by default.
@@ -55,6 +57,33 @@ sometimes you want to disable semantic chunking and just get the content of each
 llmfiles --chunk-strategy file --include "src/**/*.py"
 ```
 
+**example 5: automatic dependency resolution**
+
+start with a single entrypoint file, and `llmfiles` will follow its internal imports to build a comprehensive context.
+
+```bash
+# main.py imports utils.py, which imports helpers.py
+# llmfiles will automatically include all three files in the output.
+llmfiles src/main.py
+```
+
+**example 6: find files by content (`grep`)**
+
+you don't know the file name, but you know it contains the text "qwen image edit". use `--grep-content` to find it and all of its dependencies.
+
+```bash
+llmfiles . --grep-content "qwen image edit"
+```
+
+**example 7: list external dependencies**
+
+to see which external libraries a file depends on, use `--external-deps metadata`.
+
+```bash
+llmfiles src/utils.py --external-deps metadata
+```
+this will add a list of packages like `numpy` or `pandas` to the output for that file.
+
 ## all options
 
 ```text
@@ -71,10 +100,15 @@ options:
                           multiple times.
   -e, --exclude pattern   glob pattern for files to exclude. can be used
                           multiple times.
+  --grep-content pattern  search file contents for a pattern and include
+                          matching files as seeds for dependency resolution.
   --chunk-strategy [structure|file]
                           strategy for chunking files. 'structure' (default)
                           uses ast parsing for supported languages. 'file'
                           treats each file as a single chunk.
+  --external-deps [ignore|metadata]
+                          strategy for handling external dependencies: 'ignore'
+                          or 'metadata'.
   --no-ignore             do not respect .gitignore files.
   --hidden                include hidden files and directories (starting with
                           a dot).
