@@ -80,3 +80,27 @@ def discover_paths(config: PromptConfig) -> Iterator[Path]:
                         if file_path not in yielded_files:
                             yield file_path
                             yielded_files.add(file_path)
+
+
+def grep_files_for_content(config: PromptConfig) -> Iterator[Path]:
+    """
+    Discovers files by searching for a pattern in their content.
+    """
+    if not config.grep_content_pattern:
+        return
+
+    log.info("grep_content_search_started", pattern=config.grep_content_pattern)
+
+    # Use discover_paths to get a list of candidate files that respect all
+    # other filtering rules (.gitignore, includes/excludes, etc.).
+    candidate_files = discover_paths(config)
+
+    for file_path in candidate_files:
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+            if config.grep_content_pattern in content:
+                log.debug("grep_pattern_found_in_file", file=str(file_path))
+                yield file_path
+        except Exception as e:
+            log.warning("grep_file_read_error", file=str(file_path), error=str(e))
+            continue
