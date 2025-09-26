@@ -40,6 +40,12 @@ def load_language_configs_for_llmfiles():
                 "queries": {
                     "functions": "(function_definition name: (identifier) @function.name) @function.definition",
                     "classes": "(class_definition name: (identifier) @class.name) @class.definition",
+                    "imports": """
+                        [
+                          (import_statement name: (dotted_name) @import)
+                          (from_import_statement module_name: (dotted_name) @import)
+                        ]
+                    """
                 },
                 "node_types": {
                      "function_definition": "function_definition",

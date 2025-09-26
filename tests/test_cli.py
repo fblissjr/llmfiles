@@ -2,6 +2,9 @@ import pytest
 from pathlib import Path
 from click.testing import CliRunner
 from llmfiles.cli.interface import main_cli_group
+from llmfiles.structured_processing import ast_utils
+
+ast_utils.load_language_configs_for_llmfiles()
 
 @pytest.fixture
 def cli_project(tmp_path: Path):
@@ -30,7 +33,7 @@ def test_cli_end_to_end_dependency_resolution():
 
         result = runner.invoke(
             main_cli_group,
-            ["main.py", "--external-deps", "metadata"],
+            ["main.py", "--recursive", "--external-deps", "metadata"],
             catch_exceptions=False
         )
 
@@ -57,7 +60,7 @@ def test_cli_end_to_end_grep_seed():
 
         result = runner.invoke(
             main_cli_group,
-            [".", "--grep-content", "MAGIC_KEYWORD", "--external-deps", "metadata"],
+            [".", "--recursive", "--grep-content", "MAGIC_KEYWORD", "--external-deps", "metadata"],
             catch_exceptions=False
         )
 
