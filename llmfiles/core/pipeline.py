@@ -154,10 +154,13 @@ class PromptGenerator:
                 seed_files = list(discover_paths(self.config))
             progress.update(discover_task, completed=True, description=f"discovered {len(seed_files)} seed files.")
 
-            # New dependency resolution step
-            resolve_task = progress.add_task("resolving dependencies...", total=None)
-            paths_to_process = self._resolve_dependencies(seed_files)
-            progress.update(resolve_task, completed=True, description=f"total files to include: {len(paths_to_process)}")
+            # Conditional dependency resolution
+            if self.config.recursive:
+                resolve_task = progress.add_task("resolving dependencies...", total=None)
+                paths_to_process = self._resolve_dependencies(seed_files)
+                progress.update(resolve_task, completed=True, description=f"total files to include: {len(paths_to_process)}")
+            else:
+                paths_to_process = seed_files
 
             if paths_to_process:
                 processing_task = progress.add_task("processing content...", total=len(paths_to_process))

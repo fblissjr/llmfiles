@@ -107,6 +107,12 @@ def _print_summary_to_console(included_files: List[str]):
     help="when using --stdin, paths are separated by a nul character."
 )
 @click.option(
+    "-r", "--recursive",
+    is_flag=True,
+    default=False,
+    help="recursively include all local code imported by the seed files."
+)
+@click.option(
     "-v", "--verbose",
     is_flag=True,
     default=False,

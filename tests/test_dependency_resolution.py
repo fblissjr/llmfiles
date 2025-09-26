@@ -2,6 +2,9 @@ import pytest
 from pathlib import Path
 from llmfiles.structured_processing.language_parsers.python_parser import extract_python_imports
 from llmfiles.core.discovery.dependency_resolver import resolve_import
+from llmfiles.structured_processing import ast_utils
+
+ast_utils.load_language_configs_for_llmfiles()
 
 # --- Tests for extract_python_imports ---
 

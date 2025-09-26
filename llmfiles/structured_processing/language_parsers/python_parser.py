@@ -93,9 +93,10 @@ def extract_python_imports(content_bytes: bytes) -> List[str]:
         return []
 
     import_captures = ts.run_query("imports", LANG, ast)
-    for node, _ in import_captures:
-        import_text = ts.get_node_text(node, content_bytes)
-        imports.add(import_text)
+    for node, capture_name in import_captures:
+        if capture_name == "import":
+            import_text = ts.get_node_text(node, content_bytes)
+            imports.add(import_text)
 
     log.debug("extracted_python_imports", count=len(imports))
     return sorted(list(imports))

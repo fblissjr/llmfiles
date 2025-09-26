@@ -53,6 +53,7 @@ class PromptConfig:
     output_file: Optional[Path] = None
     read_from_stdin: bool = False
     nul_separated: bool = False
+    recursive: bool = False
 
     # internal state, not set directly by user flags.
     base_dir: Path = field(init=False)
