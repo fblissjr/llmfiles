@@ -117,25 +117,16 @@ def get_node_text(node: Optional[Node], content_bytes: bytes) -> str:
     return ""
 
 def run_query(query_key: str, lang_name: str, node: Node) -> List[Tuple[Node, str]]:
-    # >>> THE FIX IS HERE <<<
-    # this version uses the standard api call and adds specific error handling
-    # to detect the version incompatibility and guide the user.
     query_obj = QUERIES_COMPILED_TS.get(lang_name, {}).get(query_key)
     if not query_obj:
         return []
-
     try:
-        # this is the standard, documented method.
-        captures = query_obj.captures(node)
-        return captures
-    except AttributeError:
-        # if this fails, we have a definite version/install problem.
-        log.critical(
-            "FATAL: py-tree-sitter version incompatibility.",
-            details="The installed 'tree_sitter.Query' object does not support the '.captures()' method.",
-            suggestion="A corrupted or old version of py-tree-sitter is likely installed. Please force a reinstall of dependencies."
-        )
-        return [] # return empty to allow graceful fallback to whole-file chunking.
+        captures_dict = query_obj.captures(node)
+        result = []
+        for capture_name, nodes in captures_dict.items():
+            for n in nodes:
+                result.append((n, capture_name))
+        return result
     except Exception as e:
         log.error("tree_sitter_query_execution_failed", query=query_key, lang=lang_name, error=str(e))
         return []
