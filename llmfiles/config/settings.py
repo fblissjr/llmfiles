@@ -52,6 +52,7 @@ class PromptConfig:
     no_codeblock: bool = False
     exclude_binary: bool = True
     max_file_size: Optional[int] = None  # Maximum file size in bytes, None = no limit
+    git_since: Optional[str] = None  # Git date filter (e.g., "7 days ago", "2025-01-01")
     output_file: Optional[Path] = None
     read_from_stdin: bool = False
     nul_separated: bool = False

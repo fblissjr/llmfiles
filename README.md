@@ -105,6 +105,24 @@ by default, binary files (detected by UTF-8 decode errors) are excluded. to incl
 llmfiles . --include-binary
 ```
 
+**example 10: only include recently modified files (git)**
+
+filter files based on when they were last modified in git. useful for reviewing recent changes or creating context for recent work.
+
+```bash
+# files modified in the last 7 days
+llmfiles . --git-since "7 days ago"
+
+# files modified since a specific date
+llmfiles . --git-since "2025-01-01"
+
+# files modified in the last week
+llmfiles . --git-since "1 week ago"
+
+# combine with other filters
+llmfiles . --git-since "3 days ago" --include "**/*.py"
+```
+
 ## all options
 
 ```text
@@ -137,6 +155,9 @@ options:
                           errors). by default, binary files are excluded.
   --max-size SIZE         exclude files larger than specified size (e.g.,
                           '1MB', '500KB', '10MB'). accepts units: B, KB, MB, GB.
+  --git-since DATE        only include files modified in git since the
+                          specified date (e.g., '7 days ago', '2025-01-01',
+                          '1 week ago').
   -l, --follow-symlinks   follow symbolic links.
   -n, --line-numbers      prepend line numbers to file content.
   --no-codeblock          omit markdown code blocks around file content.

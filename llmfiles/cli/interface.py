@@ -124,6 +124,12 @@ def _print_summary_to_console(included_files: List[dict]):
     help="exclude files larger than specified size (e.g., '1MB', '500KB', '10MB'). accepts units: B, KB, MB, GB."
 )
 @click.option(
+    "--git-since",
+    type=str,
+    default=None,
+    help="only include files modified in git since the specified date (e.g., '7 days ago', '2025-01-01', '1 week ago')."
+)
+@click.option(
     "-l", "--follow-symlinks",
     is_flag=True,
     default=False,

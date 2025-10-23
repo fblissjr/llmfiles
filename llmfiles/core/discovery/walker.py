@@ -12,6 +12,7 @@ from llmfiles.core.discovery.pattern_matching import (
     is_path_gitignored,
     pathspec
 )
+from llmfiles.core.discovery.git_utils import get_git_modified_files
 
 log = structlog.get_logger(__name__)
 
@@ -42,6 +43,16 @@ def discover_paths(config: PromptConfig) -> Iterator[Path]:
     if not seed_paths:
         return
 
+    # Get git-filtered files if --git-since is specified
+    git_modified_files: Optional[Set[Path]] = None
+    if config.git_since:
+        git_modified_files = get_git_modified_files(config.git_since, config.base_dir)
+        if git_modified_files is None:
+            log.warning("git_filtering_failed", continuing_without_git_filter=True)
+        elif not git_modified_files:
+            log.info("no_files_modified_in_git_range", since=config.git_since)
+            return
+
     gitignore_cache: Dict[Path, Optional[pathspec.PathSpec]] = {}
     yielded_files: Set[Path] = set()
 
@@ -52,6 +63,9 @@ def discover_paths(config: PromptConfig) -> Iterator[Path]:
             path_str = rel_path.as_posix()
             if include_spec.match_file(path_str) and not (exclude_spec and exclude_spec.match_file(path_str)):
                 if not is_path_hidden(rel_path, config) and not is_path_gitignored(seed_path, config, gitignore_cache):
+                    # Apply git filter if specified
+                    if git_modified_files is not None and seed_path not in git_modified_files:
+                        continue
                     if seed_path not in yielded_files:
                         yield seed_path
                         yielded_files.add(seed_path)
@@ -77,6 +91,9 @@ def discover_paths(config: PromptConfig) -> Iterator[Path]:
 
                 if include_spec.match_file(path_str):
                     if not (exclude_spec and exclude_spec.match_file(path_str)):
+                        # Apply git filter if specified
+                        if git_modified_files is not None and file_path not in git_modified_files:
+                            continue
                         if file_path not in yielded_files:
                             yield file_path
                             yielded_files.add(file_path)
