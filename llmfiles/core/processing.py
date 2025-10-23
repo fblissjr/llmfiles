@@ -47,14 +47,20 @@ def process_file_content_to_elements(file_path: Path, config: PromptConfig) -> L
 
     try:
         content_bytes = file_path.read_bytes()
+        file_size = len(content_bytes)
     except Exception as e:
         log.warning("file_read_error", path=str(file_path), error=str(e))
         return elements
 
+    # Check file size limit if configured
+    if config.max_file_size is not None and file_size > config.max_file_size:
+        log.info("skipping_oversized_file", path=str(file_path), size_bytes=file_size, max_size=config.max_file_size)
+        return elements
+
     base_text_content = strip_utf8_bom(content_bytes).decode("utf-8", errors="replace")
 
-    if "\ufffd" in base_text_content:
-        log.info("skipping_binary_file", path=str(file_path))
+    if config.exclude_binary and "\ufffd" in base_text_content:
+        log.info("skipping_binary_file", path=str(file_path), size_bytes=file_size)
         return elements
     if not base_text_content.strip():
         log.info("skipping_empty_file", path=str(file_path))
@@ -84,6 +90,7 @@ def process_file_content_to_elements(file_path: Path, config: PromptConfig) -> L
                     element_data["start_line"]
                 )
                 element_data["llm_formatted_content"] = formatted_content
+                element_data["file_size_bytes"] = file_size
                 elements.append(element_data)
 
     if not elements:
@@ -100,7 +107,8 @@ def process_file_content_to_elements(file_path: Path, config: PromptConfig) -> L
             "raw_content": base_text_content,
             "llm_formatted_content": formatted_content,
             "name": file_path.name,
-            "qualified_name": file_rel_path_str
+            "qualified_name": file_rel_path_str,
+            "file_size_bytes": file_size
         })
 
     return elements

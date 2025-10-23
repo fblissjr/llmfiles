@@ -132,8 +132,8 @@ class PromptGenerator:
         return sorted(list(processed_files))
 
 
-    def generate(self) -> Tuple[str, List[str]]:
-        # runs the full pipeline and returns the final prompt and list of included files.
+    def generate(self) -> Tuple[str, List[Dict[str, Any]]]:
+        # runs the full pipeline and returns the final prompt and list of included files with metadata.
         app_log_level = stdlib_logging.getLogger("llmfiles").getEffectiveLevel()
         progress_disabled = app_log_level > stdlib_logging.INFO or not sys.stderr.isatty()
         stderr_console = RichConsole(file=sys.stderr)
@@ -173,6 +173,17 @@ class PromptGenerator:
             return "", []
 
         final_output = self._render_final_output()
-        unique_files = sorted(list(set(el["file_path"] for el in self.content_elements)))
 
-        return final_output, unique_files
+        # Build file info dict with path and size
+        file_info_map = {}
+        for el in self.content_elements:
+            file_path = el["file_path"]
+            if file_path not in file_info_map:
+                file_info_map[file_path] = {
+                    "path": file_path,
+                    "size_bytes": el.get("file_size_bytes", 0)
+                }
+
+        unique_files_info = sorted(file_info_map.values(), key=lambda x: x["path"])
+
+        return final_output, unique_files_info

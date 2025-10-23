@@ -10,6 +10,7 @@ it moves beyond simple file concatenation by using tree-sitter to parse code int
 -   **content-based file search:** use the `--grep-content` flag to select files based on a text pattern in their content, not just their file path.
 -   **intelligent code chunking:** automatically parses supported languages (python, javascript) into logical units like functions and classes.
 -   **fallback to file chunking:** gracefully handles unsupported file types by treating them as a single element.
+-   **smart file filtering:** automatically excludes binary files and supports size-based filtering to skip large files.
 -   **`.gitignore` aware:** respects your project's `.gitignore` files by default.
 -   **flexible file selection:** include and exclude files using familiar glob patterns.
 -   **standard unix-style composability:** designed to work with pipes and other standard cli tools like `find`, `sort`, and `xargs`.
@@ -18,7 +19,7 @@ it moves beyond simple file concatenation by using tree-sitter to parse code int
 ## installation
 
 ```bash
-pip install .
+uv pip install .
 ```
 
 ## usage
@@ -84,6 +85,26 @@ llmfiles src/utils.py --external-deps metadata
 ```
 this will add a list of packages like `numpy` or `pandas` to the output for that file.
 
+**example 8: exclude large files**
+
+skip files larger than a specified size to avoid including massive data files, logs, or compiled assets.
+
+```bash
+# exclude files larger than 1MB
+llmfiles . --max-size 1MB
+
+# exclude files larger than 500KB
+llmfiles . --max-size 500KB
+```
+
+**example 9: include binary files**
+
+by default, binary files (detected by UTF-8 decode errors) are excluded. to include them:
+
+```bash
+llmfiles . --include-binary
+```
+
 ## all options
 
 ```text
@@ -112,6 +133,10 @@ options:
   --no-ignore             do not respect .gitignore files.
   --hidden                include hidden files and directories (starting with
                           a dot).
+  --include-binary        include binary files (detected by UTF-8 decode
+                          errors). by default, binary files are excluded.
+  --max-size SIZE         exclude files larger than specified size (e.g.,
+                          '1MB', '500KB', '10MB'). accepts units: B, KB, MB, GB.
   -l, --follow-symlinks   follow symbolic links.
   -n, --line-numbers      prepend line numbers to file content.
   --no-codeblock          omit markdown code blocks around file content.
@@ -119,6 +144,8 @@ options:
   --stdin                 read file paths from standard input.
   -0, --null              when using --stdin, paths are separated by a nul
                           character.
+  -r, --recursive         recursively include all local code imported by the
+                          seed files.
   -v, --verbose           enable verbose logging output to stderr.
   --version               show the version and exit.
   -h, --help              show this message and exit.

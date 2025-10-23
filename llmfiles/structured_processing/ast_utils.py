@@ -1,5 +1,5 @@
 # llmfiles/structured_processing/ast_utils.py
-from tree_sitter import Parser, Language, Node
+from tree_sitter import Parser, Language, Node, Query, QueryCursor
 from typing import Dict, Any, Optional, List, Tuple
 import textwrap
 import structlog
@@ -43,7 +43,7 @@ def load_language_configs_for_llmfiles():
                     "imports": """
                         [
                           (import_statement name: (dotted_name) @import)
-                          (from_import_statement module_name: (dotted_name) @import)
+                          (import_from_statement module_name: (dotted_name) @import)
                         ]
                     """
                 },
@@ -121,7 +121,9 @@ def run_query(query_key: str, lang_name: str, node: Node) -> List[Tuple[Node, st
     if not query_obj:
         return []
     try:
-        captures_dict = query_obj.captures(node)
+        # tree-sitter 0.25+ API: use QueryCursor
+        cursor = QueryCursor(query_obj)
+        captures_dict = cursor.captures(node)
         result = []
         for capture_name, nodes in captures_dict.items():
             for n in nodes:

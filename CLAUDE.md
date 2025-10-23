@@ -55,6 +55,15 @@ llmfiles . --grep-content "pattern"
 
 # Include specific file patterns
 llmfiles --include "**/*.py"
+
+# Exclude files larger than 1MB
+llmfiles . --max-size 1MB
+
+# Include binary files (excluded by default)
+llmfiles . --include-binary
+
+# Combine filters
+llmfiles . --max-size 500KB --include "**/*.py" --exclude "**/test_*"
 ```
 
 ## Architecture
