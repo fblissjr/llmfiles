@@ -1,10 +1,19 @@
 import pytest
 from pathlib import Path
+from unittest.mock import patch
 from click.testing import CliRunner
 from llmfiles.cli.interface import main_cli_group
 from llmfiles.structured_processing import ast_utils
 
 ast_utils.load_language_configs_for_llmfiles()
+
+# For testing external dependency detection, we need to include test packages
+# in the installed packages set that the resolver checks against.
+TEST_INSTALLED_PACKAGES = {
+    "click", "pathspec", "rich", "structlog",
+    "tree-sitter", "tree-sitter-language-pack",
+    "numpy",  # Added for test files that import numpy
+}
 
 @pytest.fixture
 def cli_project(tmp_path: Path):
@@ -19,6 +28,7 @@ def cli_project(tmp_path: Path):
 
     return proj_dir
 
+@patch("llmfiles.core.pipeline.INSTALLED_PACKAGES", TEST_INSTALLED_PACKAGES)
 def test_cli_end_to_end_dependency_resolution():
     """
     Tests the full CLI with dependency resolution starting from a single file.
@@ -46,6 +56,7 @@ def test_cli_end_to_end_dependency_resolution():
         assert "external dependencies:" in output
         assert "- numpy" in output
 
+@patch("llmfiles.core.pipeline.INSTALLED_PACKAGES", TEST_INSTALLED_PACKAGES)
 def test_cli_end_to_end_grep_seed():
     """
     Tests the full CLI using --grep-content to seed the dependency resolution.

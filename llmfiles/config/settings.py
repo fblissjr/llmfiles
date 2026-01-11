@@ -43,7 +43,7 @@ class PromptConfig:
     include_patterns: List[str] = field(default_factory=list)
     exclude_patterns: List[str] = field(default_factory=list)
     grep_content_pattern: Optional[str] = None
-    chunk_strategy: ChunkStrategy = ChunkStrategy.STRUCTURE
+    chunk_strategy: ChunkStrategy = ChunkStrategy.FILE
     external_deps_strategy: ExternalDepsStrategy = ExternalDepsStrategy.IGNORE
     no_ignore: bool = False
     hidden: bool = False

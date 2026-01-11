@@ -38,11 +38,15 @@ def load_language_configs_for_llmfiles():
             LANG_CONFIG_TS["python"] = {
                 "ts_language_object": py_lang_obj,
                 "queries": {
-                    "functions": "(function_definition name: (identifier) @function.name) @function.definition",
+                    "functions": """
+                        (module
+                          (function_definition name: (identifier) @function.name) @function.definition)
+                    """,
                     "classes": "(class_definition name: (identifier) @class.name) @class.definition",
                     "imports": """
                         [
                           (import_statement name: (dotted_name) @import)
+                          (import_statement name: (aliased_import name: (dotted_name) @import))
                           (import_from_statement module_name: (dotted_name) @import)
                         ]
                     """
