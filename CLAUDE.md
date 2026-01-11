@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-llmfiles is a Python CLI tool that intelligently packages code and text into a single file optimized for LLMs. It uses tree-sitter for semantic code parsing and supports automatic dependency resolution.
+llmfiles is a Python CLI tool that intelligently packages code and text into a single file optimized for LLMs. It supports:
+- **GitHub repository processing**: Clone and process public repos directly from URLs
+- **Tree-sitter semantic parsing**: Optional structure-aware chunking for Python and JavaScript
+- **Automatic dependency resolution**: Follow Python imports to build complete context
 
 ## Development Commands
 
@@ -47,14 +50,21 @@ mypy llmfiles/
 # Basic usage - process current directory
 llmfiles
 
+# Process a GitHub repository directly
+llmfiles https://github.com/user/repo
+llmfiles https://github.com/user/repo --include "**/*.py"
+
 # Process specific files with dependency resolution
-llmfiles src/main.py
+llmfiles src/main.py -r
 
 # Search for files containing specific content
 llmfiles . --grep-content "pattern"
 
 # Include specific file patterns
 llmfiles --include "**/*.py"
+
+# Use structure-aware chunking (extract functions/classes)
+llmfiles --chunk-strategy structure --include "**/*.py"
 
 # Exclude files larger than 1MB
 llmfiles . --max-size 1MB
@@ -75,28 +85,35 @@ llmfiles . --max-size 500KB --include "**/*.py" --exclude "**/test_*"
    - Handles dependency resolution, file processing, and output formatting
    - Manages external dependency tracking
 
-2. **Discovery Module (llmfiles/core/discovery/)**
+2. **GitHub Support (llmfiles/core/github.py)**
+   - `is_github_url()`: Detects GitHub repository URLs
+   - `clone_github_repo()`: Clones repos to temp directories using shallow clone
+   - Auto-cleanup after processing via CLI finally block
+
+3. **Discovery Module (llmfiles/core/discovery/)**
    - `walker.py`: File system traversal with gitignore support
    - `dependency_resolver.py`: Python import resolution and dependency tracking
    - `pattern_matching.py`: Glob pattern matching for file selection
    - `path_resolution.py`: Path normalization and resolution
+   - `git_utils.py`: Git command execution for --git-since filtering
 
-3. **Structured Processing (llmfiles/structured_processing/)**
+4. **Structured Processing (llmfiles/structured_processing/)**
    - Language-specific parsers using tree-sitter
-   - `python_parser.py`: Extracts functions, classes, imports from Python files
+   - `python_parser.py`: Extracts functions, classes from Python files
    - `javascript_parser.py`: Handles JavaScript/TypeScript files
    - `ast_utils.py`: Common AST manipulation utilities
 
-4. **CLI Interface (llmfiles/cli/interface.py)**
+5. **CLI Interface (llmfiles/cli/interface.py)**
    - Click-based command structure
-   - Handles both file arguments and stdin input
+   - Handles file paths, GitHub URLs, and stdin input
    - Progress reporting via Rich library
 
 ### Key Design Patterns
 
-- **Semantic Chunking**: Files are parsed into logical units (functions, classes) rather than arbitrary text chunks
+- **File-first Chunking**: By default, files are included as complete units (simpler, no duplication)
+- **Optional Semantic Chunking**: Use `--chunk-strategy structure` to parse into functions/classes
 - **Dependency Graph Building**: Starting from seed files, follows imports to build complete context
-- **Configurable Strategies**: Supports different chunking strategies (structure vs file) and dependency handling modes
+- **Remote Source Support**: GitHub URLs are cloned to temp directories and processed like local paths
 - **Stream Processing**: Designed for Unix-style composability with pipes
 
 ### Configuration

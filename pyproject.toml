@@ -1,6 +1,6 @@
 [project]
 name = "llmfiles"
-version = "0.7.1"
+version = "0.8.0"
 description = "build llm prompts from files, codebases, with structure-aware chunking."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,3 +27,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["llmfiles"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]

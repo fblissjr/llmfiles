@@ -9,7 +9,7 @@ import structlog
 import logging as stdlib_logging
 
 import collections
-from llmfiles.config.settings import PromptConfig
+from llmfiles.config.settings import PromptConfig, ExternalDepsStrategy
 from llmfiles.core.discovery.walker import discover_paths, grep_files_for_content
 from llmfiles.core.processing import process_file_content_to_elements
 from llmfiles.exceptions import SmartPromptBuilderError
@@ -67,7 +67,7 @@ class PromptGenerator:
                 output_parts.append(f"source file: {file_path}")
 
                 # Add external dependency metadata if requested
-                if self.config.external_deps_strategy == "metadata" and file_path in self.external_dependencies:
+                if self.config.external_deps_strategy == ExternalDepsStrategy.METADATA and file_path in self.external_dependencies:
                     deps = sorted(list(self.external_dependencies[file_path]))
                     if deps:
                         output_parts.append("external dependencies:")

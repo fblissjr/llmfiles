@@ -55,32 +55,14 @@ def extract_python_elements(file_path: Path, project_root: Path, content_bytes: 
         body_node = ts.find_child_by_field(node, "body")
         docstring = ts.get_python_docstring(body_node, content_bytes)
 
-        class_element = {
+        elements.append({
             "file_path": rel_path, "element_type": "class", "name": class_name,
             "qualified_name": _build_fqn(rel_path, class_name), "language": LANG,
             "start_line": node.start_point[0] + 1, "end_line": node.end_point[0] + 1,
             "docstring": docstring, "source_code": ts.get_node_text(node, content_bytes),
-        }
-        elements.append(class_element)
-
-        # extract methods as separate elements.
-        if body_node:
-            method_captures = ts.run_query("functions", LANG, body_node)
-            for method_node, _ in method_captures:
-                method_name_node = ts.find_child_by_field(method_node, "name")
-                method_name = ts.get_node_text(method_name_node, content_bytes)
-                if not method_name: continue
-
-                method_body_node = ts.find_child_by_field(method_node, "body")
-                method_docstring = ts.get_python_docstring(method_body_node, content_bytes)
-
-                elements.append({
-                    "file_path": rel_path, "element_type": "method", "name": method_name,
-                    "qualified_name": _build_fqn(rel_path, method_name, class_name=class_name),
-                    "language": LANG, "start_line": method_node.start_point[0] + 1,
-                    "end_line": method_node.end_point[0] + 1, "docstring": method_docstring,
-                    "source_code": ts.get_node_text(method_node, content_bytes),
-                })
+        })
+        # Note: Methods are included in class source_code, not extracted separately
+        # to avoid duplication in output
 
     log.debug("extracted_python_elements", file=rel_path, count=len(elements))
     return elements

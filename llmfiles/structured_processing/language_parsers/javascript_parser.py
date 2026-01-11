@@ -34,7 +34,8 @@ def _get_element_name(node: ts.Node, content_bytes: bytes) -> Optional[str]:
     return None
 
 def extract_javascript_elements(file_path: Path, project_root: Path, content_bytes: bytes) -> List[Dict[str, Any]]:
-    # parses a javascript file and extracts functions, classes, and methods.
+    # parses a javascript file and extracts top-level functions and classes.
+    # Methods are included in class source_code, not extracted separately.
     elements: List[Dict[str, Any]] = []
     rel_path = str(file_path.relative_to(project_root))
     ast = ts.parse_code_to_ast(content_bytes, LANG)
@@ -50,23 +51,15 @@ def extract_javascript_elements(file_path: Path, project_root: Path, content_byt
             continue
         processed_nodes.add(node.id)
 
+        # Skip methods - they are already included in class source_code
+        if "method" in capture_name:
+            continue
+
         element_type = "function"
         if "class" in capture_name:
             element_type = "class"
-        elif "method" in capture_name:
-            element_type = "method"
 
         name = _get_element_name(node, content_bytes)
-
-        parent_class_name = None
-        if element_type == "method":
-            # traverse up to find the parent class node.
-            parent = node.parent
-            while parent:
-                if ts.is_node_type(parent, LANG, "class_declaration"):
-                    parent_class_name = _get_element_name(parent, content_bytes)
-                    break
-                parent = parent.parent
 
         comment_nodes = ts.get_js_doc_comment_nodes(node)
         docstring = ts.get_docstring_from_js_comments(comment_nodes, content_bytes)
@@ -75,7 +68,7 @@ def extract_javascript_elements(file_path: Path, project_root: Path, content_byt
             "file_path": rel_path,
             "element_type": element_type,
             "name": name or f"anonymous_{node.type}",
-            "qualified_name": _build_fqn(rel_path, name, class_name=parent_class_name),
+            "qualified_name": _build_fqn(rel_path, name),
             "language": LANG,
             "start_line": node.start_point[0] + 1,
             "end_line": node.end_point[0] + 1,

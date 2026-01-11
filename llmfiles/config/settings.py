@@ -58,9 +58,10 @@ class PromptConfig:
     nul_separated: bool = False
     recursive: bool = False
 
-    # internal state, not set directly by user flags.
-    base_dir: Path = field(init=False)
+    # internal state, can be set explicitly or defaults to cwd.
+    base_dir: Optional[Path] = None
 
     def __post_init__(self):
         # performs initial setup after dataclass instantiation.
-        self.base_dir = Path.cwd().resolve()
+        if self.base_dir is None:
+            self.base_dir = Path.cwd().resolve()

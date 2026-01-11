@@ -1,5 +1,7 @@
 # llmfiles/cli/interface.py
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import List
 import click
@@ -10,7 +12,8 @@ from llmfiles.config.settings import PromptConfig, ChunkStrategy, ExternalDepsSt
 from llmfiles.logging_setup import configure_logging
 from llmfiles.core.pipeline import PromptGenerator
 from llmfiles.core.output import write_to_file, write_to_stdout
-from llmfiles.exceptions import SmartPromptBuilderError
+from llmfiles.core.github import is_github_url, clone_github_repo
+from llmfiles.exceptions import SmartPromptBuilderError, GitError
 from llmfiles.structured_processing import ast_utils
 
 log = structlog.get_logger(__name__)
@@ -70,7 +73,7 @@ def _print_summary_to_console(included_files: List[dict]):
     click.secho("--------------------------\n", fg="cyan", err=True)
 
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
-@click.argument("paths", nargs=-1, type=click.Path(path_type=Path))
+@click.argument("paths", nargs=-1, type=str)
 @click.option(
     "-i", "--include", "include_patterns",
     multiple=True,
@@ -90,8 +93,8 @@ def _print_summary_to_console(included_files: List[dict]):
 @click.option(
     "--chunk-strategy",
     type=click.Choice([cs.value for cs in ChunkStrategy]),
-    default=ChunkStrategy.STRUCTURE.value,
-    help="strategy for chunking files. 'structure' (default) uses ast parsing for supported languages. 'file' treats each file as a single chunk."
+    default=ChunkStrategy.FILE.value,
+    help="strategy for chunking files. 'file' (default) treats each file as a single chunk. 'structure' uses ast parsing for supported languages."
 )
 @click.option(
     "--external-deps", "external_deps_strategy",
@@ -184,11 +187,36 @@ def main_cli_group(paths, verbose, **kwargs):
 
     log.debug("cli_command_invoked", raw_args=kwargs)
 
+    # Track temp directories for cleanup
+    temp_dirs = []
+
     try:
         ast_utils.load_language_configs_for_llmfiles()
 
+        # Process paths: detect GitHub URLs and clone them, convert strings to Path
+        processed_paths = []
+        github_base_dir = None
+        for path_str in paths:
+            if is_github_url(path_str):
+                log.info("detected_github_url", url=path_str)
+                temp_dir = Path(tempfile.mkdtemp(prefix="llmfiles_github_"))
+                temp_dirs.append(temp_dir)
+                cloned_path = clone_github_repo(path_str, temp_dir)
+                processed_paths.append(cloned_path)
+                # Use first cloned repo as base_dir for relative path calculations
+                if github_base_dir is None:
+                    github_base_dir = cloned_path
+                log.info("github_repo_cloned", url=path_str, local_path=str(cloned_path))
+            else:
+                processed_paths.append(Path(path_str))
+
         kwargs["include_patterns"] = list(kwargs["include_patterns"])
         kwargs["exclude_patterns"] = list(kwargs["exclude_patterns"])
+
+        # Set base_dir for GitHub repos (only if all paths are GitHub URLs)
+        # Resolve to handle symlinks (e.g., /var -> /private/var on macOS)
+        if github_base_dir is not None and len(temp_dirs) == len(processed_paths):
+            kwargs["base_dir"] = github_base_dir.resolve()
 
         # Convert include_binary flag to exclude_binary config
         kwargs["exclude_binary"] = not kwargs.pop("include_binary", False)
@@ -207,14 +235,11 @@ def main_cli_group(paths, verbose, **kwargs):
 
         kwargs["chunk_strategy"] = ChunkStrategy.from_string(kwargs["chunk_strategy"])
         kwargs["external_deps_strategy"] = ExternalDepsStrategy.from_string(kwargs["external_deps_strategy"])
-        kwargs["input_paths"] = list(paths)
+        # Resolve paths to handle symlinks consistently
+        kwargs["input_paths"] = [p.resolve() if hasattr(p, 'resolve') else p for p in processed_paths]
 
         config = PromptConfig(**kwargs)
 
-        #
-        # >>> THE FIX IS HERE <<<
-        # the cli function now controls the flow of data and console output.
-        #
         generator = PromptGenerator(config)
 
         # 1. generate the data. the progress bar runs inside this function.
@@ -231,6 +256,10 @@ def main_cli_group(paths, verbose, **kwargs):
             else:
                 write_to_stdout(final_prompt)
 
+    except GitError as e:
+        log.error("git_error", message=str(e))
+        click.secho(f"git error: {e}", fg="red", err=True)
+        sys.exit(1)
     except SmartPromptBuilderError as e:
         log.error("application_error", message=str(e))
         click.secho(f"error: {e}", fg="red", err=True)
@@ -239,3 +268,11 @@ def main_cli_group(paths, verbose, **kwargs):
         log.critical("unexpected_critical_error", message=str(e), exc_info=True)
         click.secho(f"unexpected critical error: {e}. please report this.", fg="red", err=True)
         sys.exit(1)
+    finally:
+        # Cleanup cloned repositories
+        for temp_dir in temp_dirs:
+            try:
+                shutil.rmtree(temp_dir)
+                log.debug("cleaned_up_temp_dir", path=str(temp_dir))
+            except Exception as e:
+                log.warning("failed_to_cleanup_temp_dir", path=str(temp_dir), error=str(e))
