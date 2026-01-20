@@ -1,7 +1,7 @@
 # llmfiles/core/pipeline.py
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Set, Tuple
 
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.console import Console as RichConsole
@@ -15,7 +15,7 @@ from llmfiles.core.processing import process_file_content_to_elements
 from llmfiles.exceptions import SmartPromptBuilderError
 from llmfiles.structured_processing.language_parsers.python_parser import extract_python_imports
 from llmfiles.core.discovery.dependency_resolver import resolve_import
-
+from llmfiles.core.jedi_tracer import CallTracer
 
 log = structlog.get_logger(__name__)
 
@@ -35,6 +35,7 @@ class PromptGenerator:
         self.log = structlog.get_logger(f"{__name__}.{self.__class__.__name__}")
         self.content_elements: List[Dict[str, Any]] = []
         self.external_dependencies: Dict[str, Set[str]] = collections.defaultdict(set)
+        self.call_graph_summary: Optional[str] = None
 
     def _render_final_output(self) -> str:
         # renders the collected content elements into the final markdown string.
@@ -42,6 +43,11 @@ class PromptGenerator:
         project_root_name = self.config.base_dir.name or str(self.config.base_dir)
 
         output_parts.append(f"project root: {project_root_name}")
+
+        # Add call graph summary if available (from --trace-calls)
+        if self.call_graph_summary:
+            output_parts.append("")
+            output_parts.append(self.call_graph_summary)
 
         # Group elements by file path to structure the output
         elements_by_file = collections.defaultdict(list)
@@ -155,7 +161,14 @@ class PromptGenerator:
             progress.update(discover_task, completed=True, description=f"discovered {len(seed_files)} seed files.")
 
             # Conditional dependency resolution
-            if self.config.recursive:
+            if self.config.trace_calls:
+                # Jedi-based semantic call tracing (Python only)
+                trace_task = progress.add_task("tracing calls with Jedi...", total=None)
+                tracer = CallTracer(project_root=self.config.base_dir)
+                paths_to_process = tracer.trace_all(seed_files)
+                self.call_graph_summary = tracer.get_call_graph_summary()
+                progress.update(trace_task, completed=True, description=f"traced {len(paths_to_process)} files.")
+            elif self.config.recursive:
                 resolve_task = progress.add_task("resolving dependencies...", total=None)
                 paths_to_process = self._resolve_dependencies(seed_files)
                 progress.update(resolve_task, completed=True, description=f"total files to include: {len(paths_to_process)}")

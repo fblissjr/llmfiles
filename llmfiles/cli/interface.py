@@ -175,6 +175,12 @@ def _print_summary_to_console(included_files: List[dict]):
     help="recursively include all local code imported by the seed files."
 )
 @click.option(
+    "--trace-calls",
+    is_flag=True,
+    default=False,
+    help="use Jedi to trace all function calls from entry files (Python only). More comprehensive than --recursive."
+)
+@click.option(
     "-v", "--verbose",
     is_flag=True,
     default=False,

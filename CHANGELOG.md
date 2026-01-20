@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.9.0
+
+### Added
+- `--trace-calls` option for semantic call tracing using Jedi (Python only)
+  - Traces all function calls from entry files to build a complete call graph
+  - More comprehensive than `--recursive` which only follows import statements
+  - Automatically excludes virtual environments, __pycache__, and node_modules
+  - Generates a call graph summary showing call relationships between files
+  - Example: `llmfiles main.py --trace-calls`
+
+### Internal
+- Added `jedi_tracer.py` module in `core/` for Jedi-based call tracing
+- Added `trace_calls` parameter to `PromptConfig`
+- Added `jedi>=0.19.0` as a new dependency
+
 ## 0.8.0
 
 ### Added

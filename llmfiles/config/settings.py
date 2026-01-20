@@ -57,6 +57,7 @@ class PromptConfig:
     read_from_stdin: bool = False
     nul_separated: bool = False
     recursive: bool = False
+    trace_calls: bool = False  # Use Jedi for semantic call tracing (Python only)
 
     # internal state, can be set explicitly or defaults to cwd.
     base_dir: Optional[Path] = None
