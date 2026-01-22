@@ -5,6 +5,8 @@ from llmfiles.core.import_tracer import (
     CallTracer,
     CallInfo,
     ImportInfo,
+    ImportedSymbol,
+    SymbolUsageVisitor,
     find_imports_ast,
     resolve_relative_import,
     resolve_import_to_path,
@@ -586,3 +588,266 @@ def do_something():
 
         assert heavy in all_files
         assert utils in all_files
+
+
+class TestSymbolUsageVisitor:
+    """Tests for the SymbolUsageVisitor class."""
+
+    def test_tracks_import_from_symbols(self):
+        """Test that from X import Y symbols are tracked."""
+        from llmfiles.core.import_tracer import SymbolUsageVisitor
+        import ast
+
+        code = """
+from helpers import func_a, func_b, func_c
+from models import User, Admin
+
+result = func_a()  # Used
+user = User()      # Used
+"""
+        tree = ast.parse(code)
+        visitor = SymbolUsageVisitor()
+        visitor.visit(tree)
+
+        used_imports = visitor.get_used_imports()
+        used_names = {sym.name for sym in used_imports}
+
+        assert "func_a" in used_names
+        assert "User" in used_names
+        assert "func_b" not in used_names  # Not used
+        assert "func_c" not in used_names  # Not used
+        assert "Admin" not in used_names   # Not used
+
+    def test_tracks_import_module(self):
+        """Test that import X style imports are tracked."""
+        from llmfiles.core.import_tracer import SymbolUsageVisitor
+        import ast
+
+        code = """
+import os
+import sys
+import json
+
+path = os.path.join("a", "b")  # os is used
+"""
+        tree = ast.parse(code)
+        visitor = SymbolUsageVisitor()
+        visitor.visit(tree)
+
+        used_modules = visitor.get_used_module_imports()
+
+        assert "os" in used_modules
+        assert "sys" not in used_modules  # Not used
+        assert "json" not in used_modules  # Not used
+
+    def test_tracks_attribute_access(self):
+        """Test that module.attr style usage is tracked."""
+        from llmfiles.core.import_tracer import SymbolUsageVisitor
+        import ast
+
+        code = """
+import config
+
+value = config.DEBUG
+other = config.get_setting("key")
+"""
+        tree = ast.parse(code)
+        visitor = SymbolUsageVisitor()
+        visitor.visit(tree)
+
+        # config should be referenced
+        assert "config" in visitor.referenced_names
+
+    def test_handles_star_imports(self):
+        """Test that star imports are flagged for mandatory inclusion."""
+        from llmfiles.core.import_tracer import SymbolUsageVisitor
+        import ast
+
+        code = """
+from constants import *
+"""
+        tree = ast.parse(code)
+        visitor = SymbolUsageVisitor()
+        visitor.visit(tree)
+
+        # Star imports should be in the list
+        assert "constants" in visitor.star_import_modules
+
+    def test_handles_aliases(self):
+        """Test that aliased imports are properly tracked."""
+        from llmfiles.core.import_tracer import SymbolUsageVisitor
+        import ast
+
+        code = """
+from helpers import long_function_name as func
+import some_module as sm
+
+result = func()
+data = sm.get_data()
+"""
+        tree = ast.parse(code)
+        visitor = SymbolUsageVisitor()
+        visitor.visit(tree)
+
+        # The alias names should be referenced
+        assert "func" in visitor.referenced_names
+        assert "sm" in visitor.referenced_names
+
+    def test_handles_type_annotations(self):
+        """Test that type annotations are tracked as usage."""
+        from llmfiles.core.import_tracer import SymbolUsageVisitor
+        import ast
+
+        code = """
+from typing import List, Optional
+from models import User
+
+def get_users() -> List[User]:
+    pass
+"""
+        tree = ast.parse(code)
+        visitor = SymbolUsageVisitor()
+        visitor.visit(tree)
+
+        # Types used in annotations should be referenced
+        assert "List" in visitor.referenced_names
+        assert "User" in visitor.referenced_names
+
+
+class TestCallTracerWithFiltering:
+    """Tests for CallTracer with filter_unused=True."""
+
+    @pytest.fixture
+    def unused_imports_project(self, tmp_path: Path):
+        """Creates a project with some unused imports."""
+        proj_dir = tmp_path / "unused_proj"
+        proj_dir.mkdir()
+
+        # main.py imports multiple modules but only uses some
+        (proj_dir / "main.py").write_text("""
+from helpers import used_func, unused_func
+from models import User, Admin, Guest
+import config
+import unused_config
+
+def main():
+    result = used_func()
+    user = User("test")
+    setting = config.DEBUG
+    return result, user, setting
+""")
+
+        # Create all the imported modules
+        (proj_dir / "helpers.py").write_text("""
+def used_func():
+    return "used"
+
+def unused_func():
+    return "unused"
+""")
+
+        (proj_dir / "models.py").write_text("""
+class User:
+    def __init__(self, name):
+        self.name = name
+
+class Admin(User):
+    pass
+
+class Guest:
+    pass
+""")
+
+        (proj_dir / "config.py").write_text("""
+DEBUG = True
+""")
+
+        (proj_dir / "unused_config.py").write_text("""
+SETTINGS = {}
+""")
+
+        return proj_dir
+
+    def test_filter_excludes_unused_imports(self, unused_imports_project: Path):
+        """Test that unused imports are filtered out."""
+        tracer = CallTracer(project_root=unused_imports_project, filter_unused=True)
+        all_files = tracer.trace_all([unused_imports_project / "main.py"])
+
+        main_path = (unused_imports_project / "main.py").resolve()
+        helpers_path = (unused_imports_project / "helpers.py").resolve()
+        models_path = (unused_imports_project / "models.py").resolve()
+        config_path = (unused_imports_project / "config.py").resolve()
+        unused_config_path = (unused_imports_project / "unused_config.py").resolve()
+
+        # Should include main and used modules
+        assert main_path in all_files
+        assert helpers_path in all_files  # used_func is used
+        assert models_path in all_files   # User is used
+        assert config_path in all_files   # config.DEBUG is used
+
+        # Should NOT include unused_config (never referenced)
+        assert unused_config_path not in all_files
+
+    def test_no_filter_includes_all_imports(self, unused_imports_project: Path):
+        """Test that without filtering, all imports are included."""
+        tracer = CallTracer(project_root=unused_imports_project, filter_unused=False)
+        all_files = tracer.trace_all([unused_imports_project / "main.py"])
+
+        unused_config_path = (unused_imports_project / "unused_config.py").resolve()
+
+        # Without filtering, unused_config should be included
+        assert unused_config_path in all_files
+
+    def test_filter_tracks_skipped_imports(self, unused_imports_project: Path):
+        """Test that skipped imports are tracked for reporting."""
+        tracer = CallTracer(project_root=unused_imports_project, filter_unused=True)
+        tracer.trace_all([unused_imports_project / "main.py"])
+
+        # Should have skipped the unused_config import
+        skipped_modules = [mod for _, mod, _ in tracer.skipped_imports]
+        assert "unused_config" in skipped_modules
+
+    def test_star_imports_always_followed(self, tmp_path: Path):
+        """Test that star imports are always followed even with filtering."""
+        proj_dir = tmp_path / "star_proj"
+        proj_dir.mkdir()
+
+        (proj_dir / "main.py").write_text("""
+from constants import *
+
+# We don't explicitly reference anything from constants
+# but star import should still be followed
+def main():
+    return 42
+""")
+
+        (proj_dir / "constants.py").write_text("""
+DEBUG = True
+VERBOSE = False
+""")
+
+        tracer = CallTracer(project_root=proj_dir, filter_unused=True)
+        all_files = tracer.trace_all([proj_dir / "main.py"])
+
+        constants_path = (proj_dir / "constants.py").resolve()
+        # Star imports must be followed even with filtering
+        assert constants_path in all_files
+
+    def test_comparison_filter_vs_no_filter(self, unused_imports_project: Path):
+        """Test that filtering reduces file count compared to no filtering."""
+        tracer_filtered = CallTracer(
+            project_root=unused_imports_project,
+            filter_unused=True
+        )
+        files_filtered = tracer_filtered.trace_all([unused_imports_project / "main.py"])
+
+        tracer_unfiltered = CallTracer(
+            project_root=unused_imports_project,
+            filter_unused=False
+        )
+        files_unfiltered = tracer_unfiltered.trace_all([unused_imports_project / "main.py"])
+
+        # Filtered should have fewer or equal files
+        assert len(files_filtered) <= len(files_unfiltered)
+        # In this specific case, should be fewer
+        assert len(files_filtered) < len(files_unfiltered)

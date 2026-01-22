@@ -232,13 +232,24 @@ class PromptGenerator:
             progress.update(discover_task, completed=True, description=f"discovered {len(seed_files)} seed files.")
 
             # Conditional dependency resolution
-            if self.config.trace_calls:
-                # Jedi-based semantic call tracing (Python only)
-                trace_task = progress.add_task("tracing calls with Jedi...", total=None)
-                tracer = CallTracer(project_root=self.config.base_dir)
+            if self.config.follow_deps or self.config.trace_calls:
+                # AST-based import tracing (Python only)
+                # Determine if filtering is enabled
+                filter_unused = self.config.filter_unused_imports and not self.config.trace_calls
+                task_desc = "tracing imports with filtering..." if filter_unused else "tracing all imports..."
+                trace_task = progress.add_task(task_desc, total=None)
+                tracer = CallTracer(
+                    project_root=self.config.base_dir,
+                    filter_unused=filter_unused,
+                )
                 paths_to_process = tracer.trace_all(seed_files)
                 self.call_graph_summary = tracer.get_call_graph_summary()
-                progress.update(trace_task, completed=True, description=f"traced {len(paths_to_process)} files.")
+                # Include skipped import count in status if filtering was used
+                skipped_count = len(tracer.skipped_imports)
+                if filter_unused and skipped_count > 0:
+                    progress.update(trace_task, completed=True, description=f"traced {len(paths_to_process)} files (filtered {skipped_count} unused imports).")
+                else:
+                    progress.update(trace_task, completed=True, description=f"traced {len(paths_to_process)} files.")
             elif self.config.recursive:
                 resolve_task = progress.add_task("resolving dependencies...", total=None)
                 paths_to_process = self._resolve_dependencies(seed_files)

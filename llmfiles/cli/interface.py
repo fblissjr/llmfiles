@@ -175,10 +175,23 @@ def _print_summary_to_console(included_files: List[dict]):
     help="recursively include all local code imported by the seed files."
 )
 @click.option(
+    "--deps",
+    is_flag=True,
+    default=False,
+    help="follow import dependencies with smart filtering (only includes imports for symbols that are actually used)."
+)
+@click.option(
+    "--all",
+    "include_all_imports",
+    is_flag=True,
+    default=False,
+    help="with --deps: include ALL imports without filtering. useful when smart filtering is too aggressive."
+)
+@click.option(
     "--trace-calls",
     is_flag=True,
     default=False,
-    help="use Jedi to trace all function calls from entry files (Python only). More comprehensive than --recursive."
+    help="[deprecated] alias for '--deps --all'. traces all imports without filtering."
 )
 @click.option(
     "--format", "output_format",
@@ -250,6 +263,28 @@ def main_cli_group(paths, verbose, **kwargs):
         kwargs["output_format"] = OutputFormat.from_string(kwargs["output_format"])
         # Resolve paths to handle symlinks consistently
         kwargs["input_paths"] = [p.resolve() if hasattr(p, 'resolve') else p for p in processed_paths]
+
+        # Handle --deps, --all, and --trace-calls flags
+        deps_flag = kwargs.pop("deps", False)
+        include_all_imports = kwargs.pop("include_all_imports", False)
+        trace_calls_flag = kwargs.pop("trace_calls", False)
+
+        # Determine dependency tracing behavior:
+        # --trace-calls is an alias for --deps --all (backward compatibility)
+        # --deps enables smart filtering by default
+        # --deps --all disables filtering
+        if trace_calls_flag:
+            kwargs["follow_deps"] = True
+            kwargs["filter_unused_imports"] = False
+            kwargs["trace_calls"] = True  # Keep for potential legacy code paths
+        elif deps_flag:
+            kwargs["follow_deps"] = True
+            kwargs["filter_unused_imports"] = not include_all_imports
+            kwargs["trace_calls"] = False
+        else:
+            kwargs["follow_deps"] = False
+            kwargs["filter_unused_imports"] = True  # Default, but won't be used if follow_deps is False
+            kwargs["trace_calls"] = False
 
         config = PromptConfig(**kwargs)
 

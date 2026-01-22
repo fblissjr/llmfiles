@@ -27,6 +27,16 @@ class ImportInfo:
     module: str  # The module being imported (may be empty for relative imports)
     line: int  # Line number
     level: int = 0  # Relative import level (0=absolute, 1=., 2=.., etc)
+    names: List[str] = field(default_factory=list)  # Specific names imported (for 'from X import a, b')
+    is_star: bool = False  # True for 'from X import *'
+
+
+@dataclass
+class ImportedSymbol:
+    """Tracks an imported symbol and whether it's used."""
+    name: str           # The local name (e.g., "func_a" or alias)
+    module: str         # Source module (e.g., "helpers")
+    line: int           # Import line number
 
 
 class ImportVisitor(ast.NodeVisitor):
@@ -37,13 +47,30 @@ class ImportVisitor(ast.NodeVisitor):
 
     def visit_Import(self, node: ast.Import):
         for alias in node.names:
-            self.imports.append(ImportInfo(module=alias.name, line=node.lineno, level=0))
+            # Get the local name (alias or first part of dotted import)
+            local_name = alias.asname or alias.name.split('.')[0]
+            self.imports.append(ImportInfo(
+                module=alias.name,
+                line=node.lineno,
+                level=0,
+                names=[local_name],
+            ))
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom):
         # node.module can be None for "from . import x" style imports
         module = node.module or ""
-        self.imports.append(ImportInfo(module=module, line=node.lineno, level=node.level))
+        # Check for star import
+        is_star = len(node.names) == 1 and node.names[0].name == '*'
+        # Get the local names being imported
+        names = [alias.asname or alias.name for alias in node.names]
+        self.imports.append(ImportInfo(
+            module=module,
+            line=node.lineno,
+            level=node.level,
+            names=names,
+            is_star=is_star,
+        ))
         self.generic_visit(node)
 
 
@@ -61,6 +88,96 @@ def find_imports_ast(code: str) -> List[ImportInfo]:
         return visitor.imports
     except SyntaxError:
         return []
+
+
+class SymbolUsageVisitor(ast.NodeVisitor):
+    """Tracks imported symbols and their actual usage in code.
+
+    This visitor performs two related tasks:
+    1. Records all imported symbols (from 'import X' and 'from X import Y')
+    2. Tracks all name references in the code
+
+    The intersection gives us which imports are actually used.
+    """
+
+    def __init__(self):
+        self.imported_symbols: Dict[str, ImportedSymbol] = {}
+        self.referenced_names: Set[str] = set()
+        self.module_imports: Dict[str, str] = {}  # alias -> module name
+        self.star_import_modules: List[str] = []  # Modules with star imports
+
+    def visit_Import(self, node: ast.Import) -> None:
+        # import X, import X as Y
+        for alias in node.names:
+            name = alias.asname or alias.name.split('.')[0]
+            self.module_imports[name] = alias.name
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        # from X import a, b, c
+        module = node.module or ''
+        if node.names[0].name == '*':
+            # Star imports - we must follow these (can't determine usage)
+            self.star_import_modules.append(module)
+            return
+        for alias in node.names:
+            name = alias.asname or alias.name
+            self.imported_symbols[name] = ImportedSymbol(
+                name=name,
+                module=module,
+                line=node.lineno
+            )
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        # Any name reference: func(), var, Type, etc.
+        self.referenced_names.add(node.id)
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        # module.func() style - track the base name
+        if isinstance(node.value, ast.Name):
+            self.referenced_names.add(node.value.id)
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        # Handle string annotations like "SomeType" in forward references
+        if isinstance(node.value, str):
+            # Could be a type annotation string - add to references
+            self.referenced_names.add(node.value)
+        self.generic_visit(node)
+
+    def get_used_imports(self) -> List[ImportedSymbol]:
+        """Return only imports that are actually referenced."""
+        return [
+            sym for sym in self.imported_symbols.values()
+            if sym.name in self.referenced_names
+        ]
+
+    def get_used_module_imports(self) -> List[str]:
+        """Return module names for 'import X' that are used."""
+        return [
+            module for alias, module in self.module_imports.items()
+            if alias in self.referenced_names
+        ]
+
+    def get_used_modules(self) -> Set[str]:
+        """Return set of all module names that are actually used."""
+        used_modules: Set[str] = set()
+
+        # Add modules from used 'from X import Y' statements
+        for sym in self.get_used_imports():
+            used_modules.add(sym.module)
+
+        # Add modules from used 'import X' statements
+        for module in self.get_used_module_imports():
+            used_modules.add(module)
+
+        # Star imports must always be followed
+        for module in self.star_import_modules:
+            used_modules.add(module)
+
+        return used_modules
 
 
 def resolve_relative_import(
@@ -171,12 +288,20 @@ class CallTracer:
     reachable through import statements (including lazy imports inside functions).
 
     Uses pure AST parsing which is fast and reliable - no code execution needed.
+
+    Args:
+        project_root: The root directory of the project
+        filter_unused: When True, only follow imports for symbols that are actually
+            used in the code. This can significantly reduce the number of files
+            traced by skipping imports that are never referenced.
     """
     project_root: Path
+    filter_unused: bool = False
     call_graph: Dict[Path, Set[Path]] = field(default_factory=dict)
     visited_files: Set[Path] = field(default_factory=set)
     discovered_calls: List[CallInfo] = field(default_factory=list)
     parse_errors: List[Tuple[Path, str]] = field(default_factory=list)
+    skipped_imports: List[Tuple[Path, str, int]] = field(default_factory=list)  # (file, module, line)
     _source_paths: Optional[List[Path]] = field(default=None, repr=False)
 
     def __post_init__(self):
@@ -185,6 +310,7 @@ class CallTracer:
         self.visited_files = set()
         self.discovered_calls = []
         self.parse_errors = []
+        self.skipped_imports = []
         self._source_paths = None
 
     def _get_source_paths(self) -> List[Path]:
@@ -233,6 +359,95 @@ class CallTracer:
         except (ValueError, OSError):
             return False
 
+    def _filter_unused_imports(
+        self,
+        code: str,
+        imports: List[ImportInfo],
+        file_path: Path,
+        rel_path: Path,
+    ) -> List[ImportInfo]:
+        """Filter imports to only include those whose symbols are actually used.
+
+        Args:
+            code: The source code of the file
+            imports: List of all imports found in the file
+            file_path: Absolute path to the file
+            rel_path: Relative path for logging
+
+        Returns:
+            Filtered list of ImportInfo objects for imports that are used
+        """
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            # If we can't parse, return all imports (conservative)
+            return imports
+
+        # Analyze symbol usage
+        usage_visitor = SymbolUsageVisitor()
+        usage_visitor.visit(tree)
+
+        # Filter imports: keep only those whose symbols are used
+        filtered_imports = []
+        for import_info in imports:
+            # Star imports must always be followed
+            if import_info.is_star:
+                filtered_imports.append(import_info)
+                continue
+
+            # Check if any of the imported names are used
+            # For 'import X' style, check if X is in referenced names
+            # For 'from X import Y' style, check if any name is used
+            should_include = False
+
+            if import_info.level > 0:
+                # Relative imports - check if module or any name is used
+                # We need to be conservative here since the module name is relative
+                for name in import_info.names:
+                    if name in usage_visitor.referenced_names:
+                        should_include = True
+                        break
+            else:
+                # Absolute imports
+                if import_info.module in usage_visitor.module_imports.values():
+                    # 'import X' style - check if X is used
+                    for alias, mod in usage_visitor.module_imports.items():
+                        if mod == import_info.module and alias in usage_visitor.referenced_names:
+                            should_include = True
+                            break
+                else:
+                    # 'from X import Y' style - check if any name is used
+                    for name in import_info.names:
+                        if name in usage_visitor.referenced_names:
+                            should_include = True
+                            break
+
+            if should_include:
+                filtered_imports.append(import_info)
+            else:
+                # Track skipped imports for debugging/reporting
+                self.skipped_imports.append((file_path, import_info.module, import_info.line))
+                log.debug(
+                    "skipping_unused_import",
+                    file=str(rel_path),
+                    module=import_info.module,
+                    line=import_info.line,
+                    names=import_info.names,
+                )
+
+        original_count = len(imports)
+        filtered_count = len(filtered_imports)
+        if original_count != filtered_count:
+            log.info(
+                "filtered_unused_imports",
+                file=str(rel_path),
+                original=original_count,
+                kept=filtered_count,
+                removed=original_count - filtered_count,
+            )
+
+        return filtered_imports
+
     def trace_file(self, file_path: Path) -> Set[Path]:
         """
         Trace all imports from a file, return discovered project files.
@@ -270,6 +485,10 @@ class CallTracer:
         imports = find_imports_ast(code)
         if not imports:
             log.debug("no_imports_found", file=str(rel_path))
+
+        # Apply symbol filtering if enabled
+        if self.filter_unused and imports:
+            imports = self._filter_unused_imports(code, imports, file_path, rel_path)
 
         source_paths = self._get_source_paths()
 

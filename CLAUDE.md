@@ -58,7 +58,13 @@ llmfiles https://github.com/user/repo --include "**/*.py"
 # Process specific files with dependency resolution
 llmfiles src/main.py -r
 
-# Trace all imports from entry files (finds lazy imports, supports src-layout)
+# Smart import tracing with unused symbol filtering (recommended)
+llmfiles main.py --deps
+
+# Trace ALL imports without filtering (when --deps misses something)
+llmfiles main.py --deps --all
+
+# Legacy alias for --deps --all (backward compatible)
 llmfiles main.py --trace-calls
 
 # Search for files containing specific content
@@ -107,6 +113,7 @@ llmfiles . --max-size 500KB --include "**/*.py" --exclude "**/test_*"
    - Supports src-layout projects and relative imports
    - Fast and reliable - pure AST parsing, no code execution
    - Automatically excludes venvs, __pycache__, and node_modules
+   - Smart symbol filtering: only follows imports for symbols actually used in code
 
 5. **Structured Processing (llmfiles/structured_processing/)**
    - Language-specific parsers using tree-sitter
@@ -124,7 +131,7 @@ llmfiles . --max-size 500KB --include "**/*.py" --exclude "**/test_*"
 - **File-first Chunking**: By default, files are included as complete units (simpler, no duplication)
 - **Optional Semantic Chunking**: Use `--chunk-strategy structure` to parse into functions/classes
 - **Dependency Graph Building**: Starting from seed files, follows imports to build complete context
-- **Import Tracing**: Use `--trace-calls` to trace all imports using AST parsing (finds lazy imports, supports src-layout)
+- **Import Tracing**: Use `--deps` for smart import tracing with unused symbol filtering, or `--deps --all` to trace all imports (finds lazy imports, supports src-layout)
 - **Remote Source Support**: GitHub URLs are cloned to temp directories and processed like local paths
 - **Stream Processing**: Designed for Unix-style composability with pipes
 
@@ -135,5 +142,35 @@ llmfiles . --max-size 500KB --include "**/*.py" --exclude "**/test_*"
 
 ### Documentation
 
-- `spec.md`: Test coverage specification - keep updated when adding/modifying features
-- `CHANGELOG.md`: Document all user-facing changes (follow semantic versioning)
+- `spec.md`: Test coverage specification - the living checklist of what's tested
+- `CHANGELOG.md`: User-facing changes (semantic versioning, no dates)
+
+## Development Workflow
+
+When making changes to this codebase, follow this checklist:
+
+### Before Starting
+1. Read this file (CLAUDE.md) for architecture context
+2. Check `spec.md` for existing test coverage of the area you're modifying
+
+### When Adding Features
+1. Write tests first (TDD) - update `spec.md` checklist as you go
+2. Implement the feature
+3. Update CLI help text if adding flags/options
+4. Add entry to `CHANGELOG.md` under appropriate version heading
+
+### When Fixing Bugs
+1. Add a failing test that reproduces the bug
+2. Fix the bug
+3. Update `spec.md` if test coverage changed
+4. Add entry to `CHANGELOG.md` if user-facing
+
+### After Completing Work
+Always update these files (check each one):
+- [ ] `spec.md` - Mark new tests as `[x]`, add new test items
+- [ ] `CHANGELOG.md` - Document user-facing changes
+- [ ] `CLAUDE.md` - Update if architecture/CLI usage changed
+- [ ] Run `uv run pytest` to verify all tests pass
+
+### Key Principle
+**Single source of truth**: Don't duplicate information across files. CLAUDE.md describes architecture, spec.md tracks test coverage, CHANGELOG.md tracks releases. Each file has one job.

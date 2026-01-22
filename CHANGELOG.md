@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.11.0
+
+### Added
+- New `--deps` flag for smart import tracing with unused symbol filtering
+  - Only follows imports for symbols that are actually used in code
+  - Significantly reduces output size by excluding unused imports
+  - Example: `llmfiles entry.py --deps` (smart filtering)
+  - Example: `llmfiles entry.py --deps --all` (no filtering, all imports)
+- New `--all` flag to disable smart filtering when used with `--deps`
+  - Use when smart filtering is too aggressive and misses needed files
+  - Equivalent to the previous `--trace-calls` behavior
+
+### Changed
+- `--trace-calls` is now an alias for `--deps --all` (backward compatible)
+  - Existing scripts using `--trace-calls` will continue to work unchanged
+  - New projects should prefer `--deps` for smarter, smaller output
+
+### Internal
+- Added `SymbolUsageVisitor` class for tracking symbol references in Python code
+- Added `ImportedSymbol` dataclass for tracking imported symbols
+- Extended `ImportInfo` with `names` and `is_star` fields for symbol-level filtering
+- Added `filter_unused` parameter to `CallTracer` for optional symbol filtering
+- Added `follow_deps` and `filter_unused_imports` config fields
+- Added comprehensive tests for symbol filtering functionality
+
 ## 0.10.0
 
 ### Added

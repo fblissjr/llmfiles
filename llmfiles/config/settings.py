@@ -73,7 +73,9 @@ class PromptConfig:
     read_from_stdin: bool = False
     nul_separated: bool = False
     recursive: bool = False
-    trace_calls: bool = False  # Use Jedi for semantic call tracing (Python only)
+    trace_calls: bool = False  # [Deprecated] Alias for follow_deps with filter_unused_imports=False
+    follow_deps: bool = False  # Follow import dependencies
+    filter_unused_imports: bool = True  # When True with follow_deps, only follow used imports
     output_format: OutputFormat = OutputFormat.COMPACT
 
     # internal state, can be set explicitly or defaults to cwd.

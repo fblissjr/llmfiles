@@ -29,6 +29,10 @@ This document tracks the test coverage requirements and progress for llmfiles.
 - [ ] File size parsing
   - [ ] Parse KB, MB, GB units
   - [ ] Invalid format handling
+- [ ] Dependency tracing flags
+  - [ ] --deps flag enables smart filtering
+  - [ ] --deps --all disables filtering
+  - [ ] --trace-calls backward compatibility (alias for --deps --all)
 
 ### 3. Processing (`llmfiles/core/processing.py`)
 - [x] `process_file_content_to_elements()`
@@ -66,6 +70,13 @@ This document tracks the test coverage requirements and progress for llmfiles.
   - [x] Single dot imports (.module)
   - [x] Multi-dot imports (..module)
   - [x] Package vs module context
+- [x] `SymbolUsageVisitor` class - Symbol usage tracking
+  - [x] Track `from X import Y` symbols
+  - [x] Track `import X` module usage
+  - [x] Track attribute access (module.attr)
+  - [x] Handle star imports (from X import *)
+  - [x] Handle aliased imports (import X as Y)
+  - [x] Handle type annotations as usage
 - [x] `CallTracer` class
   - [x] Source path detection (src/, lib/, source/)
   - [x] Project boundary checking
@@ -73,6 +84,12 @@ This document tracks the test coverage requirements and progress for llmfiles.
   - [x] BFS traversal
   - [x] Circular import handling
   - [x] Import dependency graph generation
+  - [x] Symbol filtering (filter_unused=True)
+    - [x] Exclude unused imports
+    - [x] Include all imports when filter_unused=False
+    - [x] Track skipped imports for reporting
+    - [x] Always follow star imports even with filtering
+    - [x] Comparison test: filtered vs unfiltered file counts
 - [x] Integration tests
   - [x] src-layout project with tests/ importing from src/
   - [x] Relative imports in package __init__.py
