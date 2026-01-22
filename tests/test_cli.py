@@ -43,7 +43,7 @@ def test_cli_end_to_end_dependency_resolution():
 
         result = runner.invoke(
             main_cli_group,
-            ["main.py", "--recursive", "--external-deps", "metadata"],
+            ["main.py", "--recursive", "--external-deps", "metadata", "--format", "verbose"],
             catch_exceptions=False
         )
 
@@ -71,7 +71,7 @@ def test_cli_end_to_end_grep_seed():
 
         result = runner.invoke(
             main_cli_group,
-            [".", "--recursive", "--grep-content", "MAGIC_KEYWORD", "--external-deps", "metadata"],
+            [".", "--recursive", "--grep-content", "MAGIC_KEYWORD", "--external-deps", "metadata", "--format", "verbose"],
             catch_exceptions=False
         )
 

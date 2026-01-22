@@ -36,6 +36,22 @@ class ExternalDepsStrategy(Enum):
             log.warning("invalid_external_deps_strategy", input_string=s)
             return cls.IGNORE
 
+
+class OutputFormat(Enum):
+    # defines output format style.
+    COMPACT = "compact"  # Optimized for LLM consumption (file index first, code, then deps)
+    VERBOSE = "verbose"  # Legacy format with full dependency graph upfront
+
+    @classmethod
+    def from_string(cls, s: Optional[str]) -> "OutputFormat":
+        if not s:
+            return cls.COMPACT
+        try:
+            return cls(s.lower())
+        except ValueError:
+            log.warning("invalid_output_format", input_string=s)
+            return cls.COMPACT
+
 @dataclass
 class PromptConfig:
     # holds all configuration parameters for a single run.
@@ -58,6 +74,7 @@ class PromptConfig:
     nul_separated: bool = False
     recursive: bool = False
     trace_calls: bool = False  # Use Jedi for semantic call tracing (Python only)
+    output_format: OutputFormat = OutputFormat.COMPACT
 
     # internal state, can be set explicitly or defaults to cwd.
     base_dir: Optional[Path] = None

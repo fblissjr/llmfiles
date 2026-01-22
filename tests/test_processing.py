@@ -34,12 +34,12 @@ class TestDefaultChunkStrategy:
 
             result = runner.invoke(
                 main_cli_group,
-                ["module.py"],  # No --chunk-strategy specified
+                ["module.py", "--format", "verbose"],  # Use verbose to check element type
                 catch_exceptions=False
             )
 
             assert result.exit_code == 0
-            # In file mode, element type is "file"
+            # In file mode (verbose format), element type is "file"
             assert "element type: file" in result.output
             # Should NOT show separate function elements
             assert "element type: function" not in result.output
@@ -251,3 +251,182 @@ class TestEmptyFileHandling:
         elements = process_file_content_to_elements(test_file, config)
 
         assert len(elements) == 0
+
+
+class TestCompactOutputFormat:
+    """Tests for compact output format (LLM-optimized)."""
+
+    def test_compact_format_has_file_index_table(self, tmp_path):
+        """Compact format should include a markdown file index table."""
+        runner = CliRunner()
+        with runner.isolated_filesystem() as td:
+            proj_dir = Path(td)
+            (proj_dir / "module.py").write_text("def foo(): pass\n")
+
+            result = runner.invoke(
+                main_cli_group,
+                ["module.py", "--format", "compact"],
+                catch_exceptions=False
+            )
+
+            assert result.exit_code == 0
+            # Check for file index table headers
+            assert "## Files" in result.output
+            assert "| File | Size | Lines | Description |" in result.output
+            assert "module.py" in result.output
+
+    def test_compact_format_has_code_section(self, tmp_path):
+        """Compact format should have a Code section with file content."""
+        runner = CliRunner()
+        with runner.isolated_filesystem() as td:
+            proj_dir = Path(td)
+            (proj_dir / "module.py").write_text("def foo(): pass\n")
+
+            result = runner.invoke(
+                main_cli_group,
+                ["module.py", "--format", "compact"],
+                catch_exceptions=False
+            )
+
+            assert result.exit_code == 0
+            assert "## Code" in result.output
+            assert "### module.py" in result.output
+            assert "def foo(): pass" in result.output
+
+    def test_compact_format_is_default(self, tmp_path):
+        """Compact format should be the default (no --format flag needed)."""
+        runner = CliRunner()
+        with runner.isolated_filesystem() as td:
+            proj_dir = Path(td)
+            (proj_dir / "module.py").write_text("def foo(): pass\n")
+
+            result = runner.invoke(
+                main_cli_group,
+                ["module.py"],  # No --format specified
+                catch_exceptions=False
+            )
+
+            assert result.exit_code == 0
+            # Compact format markers
+            assert "## Files" in result.output
+            assert "## Code" in result.output
+            # Verbose format markers should NOT be present
+            assert "element type:" not in result.output
+            assert "source file:" not in result.output
+
+    def test_verbose_format_has_element_metadata(self, tmp_path):
+        """Verbose format should include detailed element metadata."""
+        runner = CliRunner()
+        with runner.isolated_filesystem() as td:
+            proj_dir = Path(td)
+            (proj_dir / "module.py").write_text("def foo(): pass\n")
+
+            result = runner.invoke(
+                main_cli_group,
+                ["module.py", "--format", "verbose"],
+                catch_exceptions=False
+            )
+
+            assert result.exit_code == 0
+            assert "source file: module.py" in result.output
+            assert "element type: file" in result.output
+            assert "lines: 1-" in result.output
+
+
+class TestModuleDescription:
+    """Tests for module docstring extraction."""
+
+    def test_extracts_module_docstring(self, tmp_path):
+        """Module docstring should be extracted as description."""
+        test_file = tmp_path / "module.py"
+        test_file.write_text(
+            '"""This module does something useful."""\n'
+            'def foo(): pass\n'
+        )
+        config = PromptConfig(
+            input_paths=[test_file],
+            base_dir=tmp_path,
+        )
+
+        elements = process_file_content_to_elements(test_file, config)
+
+        assert len(elements) == 1
+        assert elements[0]["description"] == "This module does something useful."
+
+    def test_extracts_first_line_of_multiline_docstring(self, tmp_path):
+        """Only first line of multiline docstring should be extracted."""
+        test_file = tmp_path / "module.py"
+        test_file.write_text(
+            '"""First line summary.\n\nMore details here.\n"""\n'
+            'def foo(): pass\n'
+        )
+        config = PromptConfig(
+            input_paths=[test_file],
+            base_dir=tmp_path,
+        )
+
+        elements = process_file_content_to_elements(test_file, config)
+
+        assert len(elements) == 1
+        assert elements[0]["description"] == "First line summary."
+
+    def test_no_description_when_no_docstring(self, tmp_path):
+        """Files without module docstring should have None description."""
+        test_file = tmp_path / "module.py"
+        test_file.write_text("def foo(): pass\n")
+        config = PromptConfig(
+            input_paths=[test_file],
+            base_dir=tmp_path,
+        )
+
+        elements = process_file_content_to_elements(test_file, config)
+
+        assert len(elements) == 1
+        assert elements[0]["description"] is None
+
+    def test_non_python_has_no_description(self, tmp_path):
+        """Non-Python files should have None description."""
+        test_file = tmp_path / "module.js"
+        test_file.write_text("// JavaScript file\nconst x = 1;\n")
+        config = PromptConfig(
+            input_paths=[test_file],
+            base_dir=tmp_path,
+        )
+
+        elements = process_file_content_to_elements(test_file, config)
+
+        assert len(elements) == 1
+        assert elements[0]["description"] is None
+
+
+class TestElementLineCount:
+    """Tests for line_count field in elements."""
+
+    def test_element_has_line_count(self, tmp_path):
+        """Elements should include a line_count field."""
+        test_file = tmp_path / "module.py"
+        test_file.write_text("def foo():\n    pass\n")
+        config = PromptConfig(
+            input_paths=[test_file],
+            base_dir=tmp_path,
+        )
+
+        elements = process_file_content_to_elements(test_file, config)
+
+        assert len(elements) == 1
+        assert elements[0]["line_count"] == 2
+
+    def test_line_count_matches_content(self, tmp_path):
+        """line_count should match actual content lines."""
+        test_file = tmp_path / "module.py"
+        content = "line1\nline2\nline3\nline4\nline5\n"
+        test_file.write_text(content)
+        config = PromptConfig(
+            input_paths=[test_file],
+            base_dir=tmp_path,
+        )
+
+        elements = process_file_content_to_elements(test_file, config)
+
+        assert len(elements) == 1
+        assert elements[0]["line_count"] == 5

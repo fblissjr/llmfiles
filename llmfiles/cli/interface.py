@@ -8,7 +8,7 @@ import click
 import structlog
 
 from llmfiles import __version__ as app_version
-from llmfiles.config.settings import PromptConfig, ChunkStrategy, ExternalDepsStrategy
+from llmfiles.config.settings import PromptConfig, ChunkStrategy, ExternalDepsStrategy, OutputFormat
 from llmfiles.logging_setup import configure_logging
 from llmfiles.core.pipeline import PromptGenerator
 from llmfiles.core.output import write_to_file, write_to_stdout
@@ -181,6 +181,12 @@ def _print_summary_to_console(included_files: List[dict]):
     help="use Jedi to trace all function calls from entry files (Python only). More comprehensive than --recursive."
 )
 @click.option(
+    "--format", "output_format",
+    type=click.Choice([of.value for of in OutputFormat]),
+    default=OutputFormat.COMPACT.value,
+    help="output format: 'compact' (default, optimized for LLM consumption) or 'verbose' (legacy format with full metadata)."
+)
+@click.option(
     "-v", "--verbose",
     is_flag=True,
     default=False,
@@ -241,6 +247,7 @@ def main_cli_group(paths, verbose, **kwargs):
 
         kwargs["chunk_strategy"] = ChunkStrategy.from_string(kwargs["chunk_strategy"])
         kwargs["external_deps_strategy"] = ExternalDepsStrategy.from_string(kwargs["external_deps_strategy"])
+        kwargs["output_format"] = OutputFormat.from_string(kwargs["output_format"])
         # Resolve paths to handle symlinks consistently
         kwargs["input_paths"] = [p.resolve() if hasattr(p, 'resolve') else p for p in processed_paths]
 

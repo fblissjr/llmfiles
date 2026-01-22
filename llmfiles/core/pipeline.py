@@ -9,7 +9,7 @@ import structlog
 import logging as stdlib_logging
 
 import collections
-from llmfiles.config.settings import PromptConfig, ExternalDepsStrategy
+from llmfiles.config.settings import PromptConfig, ExternalDepsStrategy, OutputFormat
 from llmfiles.core.discovery.walker import discover_paths, grep_files_for_content
 from llmfiles.core.processing import process_file_content_to_elements
 from llmfiles.exceptions import SmartPromptBuilderError
@@ -38,7 +38,78 @@ class PromptGenerator:
         self.call_graph_summary: Optional[str] = None
 
     def _render_final_output(self) -> str:
-        # renders the collected content elements into the final markdown string.
+        """Renders the collected content elements into the final markdown string."""
+        if self.config.output_format == OutputFormat.COMPACT:
+            return self._render_compact_output()
+        else:
+            return self._render_verbose_output()
+
+    def _format_size(self, size_bytes: int) -> str:
+        """Format file size in human-readable format."""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f}{unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f}TB"
+
+    def _render_file_index(self, elements_by_file: dict, sorted_file_paths: list) -> str:
+        """Render compact file index table with sizes and descriptions."""
+        lines = [
+            "## Files\n",
+            "| File | Size | Lines | Description |",
+            "|------|------|-------|-------------|"
+        ]
+        for file_path in sorted_file_paths:
+            elements = elements_by_file[file_path]
+            # Get first element for file-level info
+            first_elem = elements[0]
+            size = self._format_size(first_elem.get('file_size_bytes', 0))
+            line_count = first_elem.get('line_count', first_elem.get('end_line', 0))
+            desc = first_elem.get('description') or ''
+            # Truncate long descriptions
+            if len(desc) > 60:
+                desc = desc[:57] + '...'
+            lines.append(f"| {file_path} | {size} | {line_count} | {desc} |")
+        return "\n".join(lines)
+
+    def _render_compact_output(self) -> str:
+        """Render output in compact format optimized for LLM consumption."""
+        output_parts = []
+        project_root_name = self.config.base_dir.name or str(self.config.base_dir)
+
+        # 1. Header
+        output_parts.append(f"# {project_root_name}\n")
+
+        # Group elements by file path
+        elements_by_file = collections.defaultdict(list)
+        for el in self.content_elements:
+            elements_by_file[el["file_path"]].append(el)
+        sorted_file_paths = sorted(elements_by_file.keys())
+
+        # 2. File Index Table
+        if sorted_file_paths:
+            output_parts.append(self._render_file_index(elements_by_file, sorted_file_paths))
+            output_parts.append("")
+
+        # 3. Code Content
+        if self.content_elements:
+            output_parts.append("## Code\n")
+            for file_path in sorted_file_paths:
+                for element in elements_by_file[file_path]:
+                    line_count = element.get('line_count', element.get('end_line', 0))
+                    output_parts.append(f"### {file_path} ({line_count} lines)")
+                    output_parts.append(f"{element.get('llm_formatted_content')}")
+                    output_parts.append("")
+
+        # 4. Dependency Graph (at end, if --trace-calls was used)
+        if self.call_graph_summary:
+            output_parts.append("---\n")
+            output_parts.append(self.call_graph_summary)
+
+        return "\n".join(output_parts)
+
+    def _render_verbose_output(self) -> str:
+        """Render output in verbose/legacy format with full metadata upfront."""
         output_parts = []
         project_root_name = self.config.base_dir.name or str(self.config.base_dir)
 

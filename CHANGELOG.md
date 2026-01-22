@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.10.0
+
+### Added
+- New `--format` CLI option to choose output format
+  - `compact` (new default): LLM-optimized format with file index table first, then code, then dependency graph at end
+  - `verbose`: Legacy format with full metadata upfront for backward compatibility
+- File index table in compact format showing size, line count, and description for each file
+- Module docstring extraction: Python files with docstrings now show first line as description in file index
+- `line_count` field added to all processed elements
+
+### Changed
+- **Breaking**: Default output format changed from verbose to compact
+  - Compact format puts code content before metadata (reduces context pollution for LLMs)
+  - Dependency graph moved to end of output (was at beginning in verbose format)
+  - File headers simplified: `### path/to/file.py (N lines)` instead of verbose element metadata
+  - Use `--format verbose` to get the previous format
+
+### Improved
+- LLM context efficiency: Reduced metadata overhead before actual code content
+- File prioritization: File index table helps LLMs understand codebase structure at a glance
+
 ## 0.9.0
 
 ### Added
