@@ -5,17 +5,26 @@ All notable changes to this project will be documented in this file.
 ## 0.9.0
 
 ### Added
-- `--trace-calls` option for semantic call tracing using Jedi (Python only)
-  - Traces all function calls from entry files to build a complete call graph
-  - More comprehensive than `--recursive` which only follows import statements
+- `--trace-calls` option for import tracing using AST parsing (Python only)
+  - Traces all imports from entry files to build a complete dependency graph
+  - Finds all imports including lazy imports inside functions
+  - Supports src-layout projects (automatically adds src/, lib/, source/ to search paths)
+  - Handles relative imports (`.module`, `..module`)
+  - Fast and reliable - pure AST parsing, no code execution
   - Automatically excludes virtual environments, __pycache__, and node_modules
-  - Generates a call graph summary showing call relationships between files
+  - Generates an import dependency graph showing relationships between files
   - Example: `llmfiles main.py --trace-calls`
 
+### Changed
+- Replaced Jedi-based call tracing with AST-based import tracing
+  - Previous Jedi implementation would hang on files importing heavy dependencies (e.g., torch)
+  - AST approach is instant and doesn't require loading any modules
+
 ### Internal
-- Added `jedi_tracer.py` module in `core/` for Jedi-based call tracing
-- Added `trace_calls` parameter to `PromptConfig`
-- Added `jedi>=0.19.0` as a new dependency
+- Renamed `jedi_tracer.py` to `import_tracer.py` and rewrote to use pure AST parsing
+- Added `ImportInfo` dataclass for import information
+- Added `resolve_relative_import()` for handling relative imports
+- Removed `jedi` dependency - no longer needed
 
 ## 0.8.0
 

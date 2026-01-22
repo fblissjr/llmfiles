@@ -52,7 +52,33 @@ This document tracks the test coverage requirements and progress for llmfiles.
 - [x] Stdlib resolution
 - [x] Unresolved imports
 
-### 5. Discovery (`llmfiles/core/discovery/`)
+### 5. Import Tracer (`llmfiles/core/import_tracer.py`)
+- [x] `find_imports_ast()` - AST-based import finding
+  - [x] Top-level imports
+  - [x] Lazy imports inside functions
+  - [x] Relative imports (.module, ..module)
+  - [x] Syntax error handling
+- [x] `resolve_import_to_path()` - Module path resolution
+  - [x] Package resolution (dir/__init__.py)
+  - [x] Module resolution (file.py)
+  - [x] src-layout support
+- [x] `resolve_relative_import()` - Relative import resolution
+  - [x] Single dot imports (.module)
+  - [x] Multi-dot imports (..module)
+  - [x] Package vs module context
+- [x] `CallTracer` class
+  - [x] Source path detection (src/, lib/, source/)
+  - [x] Project boundary checking
+  - [x] Excluded directory filtering (venv, __pycache__, etc.)
+  - [x] BFS traversal
+  - [x] Circular import handling
+  - [x] Import dependency graph generation
+- [x] Integration tests
+  - [x] src-layout project with tests/ importing from src/
+  - [x] Relative imports in package __init__.py
+  - [x] Lazy imports inside functions
+
+### 6. Discovery (`llmfiles/core/discovery/`)
 - [x] Grep files for content
 - [x] Grep files no matches
 - [ ] Pattern matching
@@ -62,7 +88,7 @@ This document tracks the test coverage requirements and progress for llmfiles.
 - [ ] Git-based filtering
   - [ ] Files modified since date
 
-### 6. Language Parsers (`llmfiles/structured_processing/language_parsers/`)
+### 7. Language Parsers (`llmfiles/structured_processing/language_parsers/`)
 - [ ] Python parser
   - [ ] Extract functions
   - [ ] Extract classes (without duplicate methods)
@@ -72,7 +98,7 @@ This document tracks the test coverage requirements and progress for llmfiles.
   - [ ] Extract classes
   - [ ] Arrow functions
 
-### 7. Output (`llmfiles/core/output.py`)
+### 8. Output (`llmfiles/core/output.py`)
 - [ ] Write to stdout
 - [ ] Write to file
 

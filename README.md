@@ -7,6 +7,7 @@ it moves beyond simple file concatenation by using tree-sitter to parse code int
 ## features
 
 -   **github repository support:** process remote github repositories directly by passing a url - no manual cloning required.
+-   **import tracing:** use `--trace-calls` to trace all imports from entry files using AST parsing, building a complete dependency graph (Python only). finds all imports including lazy imports inside functions. fast and reliable - no code execution needed.
 -   **recursive dependency resolution:** for python, automatically finds and includes files that are imported by your seed files, providing much richer context.
 -   **content-based file search:** use the `--grep-content` flag to select files based on a text pattern in their content, not just their file path.
 -   **intelligent code chunking:** optionally parse supported languages (python, javascript) into logical units like functions and classes with `--chunk-strategy structure`.
@@ -83,7 +84,18 @@ start with a single entrypoint file, and `llmfiles` will follow its internal imp
 llmfiles src/main.py
 ```
 
-**example 7: find files by content (`grep`)**
+**example 7: import tracing (python)**
+
+for deeper analysis, use `--trace-calls` to trace all imports from entry files using AST parsing. this finds all imports including lazy imports inside functions, and supports src-layout projects.
+
+```bash
+# trace all imports from main.py to build a complete dependency graph
+llmfiles main.py --trace-calls
+
+# the output includes an import dependency graph showing relationships between files
+```
+
+**example 8: find files by content (`grep`)**
 
 you don't know the file name, but you know it contains the text "qwen image edit". use `--grep-content` to find it and all of its dependencies.
 
@@ -91,7 +103,7 @@ you don't know the file name, but you know it contains the text "qwen image edit
 llmfiles . --grep-content "qwen image edit"
 ```
 
-**example 8: list external dependencies**
+**example 9: list external dependencies**
 
 to see which external libraries a file depends on, use `--external-deps metadata`.
 
@@ -100,7 +112,7 @@ llmfiles src/utils.py --external-deps metadata
 ```
 this will add a list of packages like `numpy` or `pandas` to the output for that file.
 
-**example 9: exclude large files**
+**example 10: exclude large files**
 
 skip files larger than a specified size to avoid including massive data files, logs, or compiled assets.
 
@@ -112,7 +124,7 @@ llmfiles . --max-size 1MB
 llmfiles . --max-size 500KB
 ```
 
-**example 10: include binary files**
+**example 11: include binary files**
 
 by default, binary files (detected by UTF-8 decode errors) are excluded. to include them:
 
@@ -120,7 +132,7 @@ by default, binary files (detected by UTF-8 decode errors) are excluded. to incl
 llmfiles . --include-binary
 ```
 
-**example 11: only include recently modified files (git)**
+**example 12: only include recently modified files (git)**
 
 filter files based on when they were last modified in git. useful for reviewing recent changes or creating context for recent work.
 
@@ -182,6 +194,8 @@ options:
                           character.
   -r, --recursive         recursively include all local code imported by the
                           seed files.
+  --trace-calls           trace all imports from entry files using AST parsing
+                          (Python only). finds lazy imports, supports src-layout.
   -v, --verbose           enable verbose logging output to stderr.
   --version               show the version and exit.
   -h, --help              show this message and exit.

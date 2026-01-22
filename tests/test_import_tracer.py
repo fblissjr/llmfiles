@@ -1,7 +1,14 @@
-"""Tests for Jedi-based call tracing."""
+"""Tests for AST-based import tracing."""
 import pytest
 from pathlib import Path
-from llmfiles.core.jedi_tracer import CallTracer, CallInfo
+from llmfiles.core.import_tracer import (
+    CallTracer,
+    CallInfo,
+    ImportInfo,
+    find_imports_ast,
+    resolve_relative_import,
+    resolve_import_to_path,
+)
 
 
 @pytest.fixture
@@ -256,7 +263,7 @@ def standalone():
         summary = tracer.get_call_graph_summary()
 
         # Summary should contain key sections
-        assert "## Call Graph" in summary
+        assert "## Import Dependency Graph" in summary
         assert "## Discovered Files" in summary
         assert "main.py" in summary
         assert "helper.py" in summary
@@ -360,3 +367,222 @@ def common():
         assert (proj_dir / "entry1.py").resolve() in all_files
         assert (proj_dir / "entry2.py").resolve() in all_files
         assert (proj_dir / "shared.py").resolve() in all_files
+
+
+class TestSrcLayoutProject:
+    """Tests for src-layout projects (like llm-dit-experiments)."""
+
+    @pytest.fixture
+    def src_layout_project(self, tmp_path: Path):
+        """Creates a src-layout project: tests/ imports from src/mypackage/."""
+        proj_dir = tmp_path / "src_layout_proj"
+        proj_dir.mkdir()
+
+        # Create src/mypackage structure
+        src_dir = proj_dir / "src" / "mypackage"
+        src_dir.mkdir(parents=True)
+
+        (src_dir / "__init__.py").write_text("""
+from .core import process
+from .utils import helper
+""")
+
+        (src_dir / "core.py").write_text("""
+def process(data):
+    return data.upper()
+""")
+
+        (src_dir / "utils.py").write_text("""
+def helper():
+    return "help"
+""")
+
+        # Create tests/ structure
+        tests_dir = proj_dir / "tests"
+        tests_dir.mkdir()
+
+        (tests_dir / "__init__.py").write_text("")
+
+        (tests_dir / "test_core.py").write_text("""
+from mypackage import process
+from mypackage.utils import helper
+
+def test_process():
+    assert process("hello") == "HELLO"
+
+def test_helper():
+    assert helper() == "help"
+""")
+
+        return proj_dir
+
+    def test_src_layout_discovery(self, src_layout_project: Path):
+        """Test that imports from src/ are discovered from tests/."""
+        tracer = CallTracer(project_root=src_layout_project)
+        all_files = tracer.trace_all([src_layout_project / "tests" / "test_core.py"])
+
+        # Should discover test file and src files
+        assert len(all_files) >= 3  # At least test_core.py, __init__.py, core.py or utils.py
+
+        # Specifically check src files were found
+        src_init = (src_layout_project / "src" / "mypackage" / "__init__.py").resolve()
+        src_core = (src_layout_project / "src" / "mypackage" / "core.py").resolve()
+        src_utils = (src_layout_project / "src" / "mypackage" / "utils.py").resolve()
+
+        assert src_init in all_files or src_core in all_files or src_utils in all_files
+
+    def test_src_path_detection(self, src_layout_project: Path):
+        """Test that src/ is automatically added to source paths."""
+        tracer = CallTracer(project_root=src_layout_project)
+        source_paths = tracer._get_source_paths()
+
+        # src/ directory should be in source paths
+        assert any(p.name == "src" for p in source_paths)
+
+
+class TestRelativeImports:
+    """Tests for relative import resolution."""
+
+    @pytest.fixture
+    def package_with_relative_imports(self, tmp_path: Path):
+        """Creates a package using relative imports."""
+        proj_dir = tmp_path / "rel_imports_proj"
+        proj_dir.mkdir()
+
+        pkg_dir = proj_dir / "mypackage"
+        pkg_dir.mkdir()
+
+        # __init__.py uses relative imports
+        (pkg_dir / "__init__.py").write_text("""
+from .protocol import Backend
+from .impl import DefaultBackend
+""")
+
+        (pkg_dir / "protocol.py").write_text("""
+class Backend:
+    def run(self):
+        pass
+""")
+
+        (pkg_dir / "impl.py").write_text("""
+from .protocol import Backend
+
+class DefaultBackend(Backend):
+    def run(self):
+        return "default"
+""")
+
+        # Entry point at project root
+        (proj_dir / "main.py").write_text("""
+from mypackage import Backend, DefaultBackend
+
+def main():
+    backend = DefaultBackend()
+    return backend.run()
+""")
+
+        return proj_dir
+
+    def test_relative_imports_resolved(self, package_with_relative_imports: Path):
+        """Test that relative imports are properly resolved."""
+        tracer = CallTracer(project_root=package_with_relative_imports)
+        all_files = tracer.trace_all([package_with_relative_imports / "main.py"])
+
+        # Should discover all files including those via relative imports
+        pkg_dir = package_with_relative_imports / "mypackage"
+        protocol = (pkg_dir / "protocol.py").resolve()
+        impl = (pkg_dir / "impl.py").resolve()
+
+        assert protocol in all_files
+        assert impl in all_files
+
+    def test_find_imports_includes_relative(self):
+        """Test that find_imports_ast captures relative imports."""
+        code = """
+from .protocol import Backend
+from ..utils import helper
+import os
+from mypackage.core import process
+"""
+        imports = find_imports_ast(code)
+
+        # Should find 4 imports total
+        assert len(imports) == 4
+
+        # Check relative imports are captured with correct level
+        protocol_import = next(i for i in imports if i.module == "protocol")
+        assert protocol_import.level == 1
+
+        utils_import = next(i for i in imports if i.module == "utils")
+        assert utils_import.level == 2
+
+        # Absolute imports have level 0
+        os_import = next(i for i in imports if i.module == "os")
+        assert os_import.level == 0
+
+    def test_resolve_relative_import_single_dot(self, tmp_path: Path):
+        """Test resolving single-dot relative imports."""
+        proj_dir = tmp_path / "proj"
+        pkg_dir = proj_dir / "mypackage"
+        pkg_dir.mkdir(parents=True)
+
+        init_file = pkg_dir / "__init__.py"
+        init_file.write_text("")
+
+        import_info = ImportInfo(module="protocol", line=1, level=1)
+        result = resolve_relative_import(import_info, init_file, proj_dir)
+
+        assert result == "mypackage.protocol"
+
+    def test_resolve_relative_import_double_dot(self, tmp_path: Path):
+        """Test resolving double-dot relative imports."""
+        proj_dir = tmp_path / "proj"
+        sub_pkg = proj_dir / "mypackage" / "sub"
+        sub_pkg.mkdir(parents=True)
+
+        module_file = sub_pkg / "module.py"
+        module_file.write_text("")
+
+        import_info = ImportInfo(module="utils", line=1, level=2)
+        result = resolve_relative_import(import_info, module_file, proj_dir)
+
+        assert result == "mypackage.utils"
+
+
+class TestLazyImports:
+    """Tests for lazy imports inside functions."""
+
+    def test_lazy_imports_discovered(self, tmp_path: Path):
+        """Test that imports inside functions are discovered."""
+        proj_dir = tmp_path / "lazy_proj"
+        proj_dir.mkdir()
+
+        (proj_dir / "main.py").write_text("""
+def load_heavy_module():
+    from heavy import HeavyClass
+    return HeavyClass()
+
+def another_function():
+    import utils
+    return utils.do_something()
+""")
+
+        (proj_dir / "heavy.py").write_text("""
+class HeavyClass:
+    pass
+""")
+
+        (proj_dir / "utils.py").write_text("""
+def do_something():
+    return 42
+""")
+
+        tracer = CallTracer(project_root=proj_dir)
+        all_files = tracer.trace_all([proj_dir / "main.py"])
+
+        # Should discover both lazy-imported files
+        heavy = (proj_dir / "heavy.py").resolve()
+        utils = (proj_dir / "utils.py").resolve()
+
+        assert heavy in all_files
+        assert utils in all_files

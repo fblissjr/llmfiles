@@ -8,6 +8,7 @@ llmfiles is a Python CLI tool that intelligently packages code and text into a s
 - **GitHub repository processing**: Clone and process public repos directly from URLs
 - **Tree-sitter semantic parsing**: Optional structure-aware chunking for Python and JavaScript
 - **Automatic dependency resolution**: Follow Python imports to build complete context
+- **AST-based import tracing**: Trace all imports from entry files using pure AST parsing (Python only). Finds lazy imports, supports src-layout projects.
 
 ## Development Commands
 
@@ -57,6 +58,9 @@ llmfiles https://github.com/user/repo --include "**/*.py"
 # Process specific files with dependency resolution
 llmfiles src/main.py -r
 
+# Trace all imports from entry files (finds lazy imports, supports src-layout)
+llmfiles main.py --trace-calls
+
 # Search for files containing specific content
 llmfiles . --grep-content "pattern"
 
@@ -97,13 +101,20 @@ llmfiles . --max-size 500KB --include "**/*.py" --exclude "**/test_*"
    - `path_resolution.py`: Path normalization and resolution
    - `git_utils.py`: Git command execution for --git-since filtering
 
-4. **Structured Processing (llmfiles/structured_processing/)**
+4. **Import Tracer (llmfiles/core/import_tracer.py)**
+   - AST-based import tracing for Python files
+   - Finds all imports including lazy imports inside functions
+   - Supports src-layout projects and relative imports
+   - Fast and reliable - pure AST parsing, no code execution
+   - Automatically excludes venvs, __pycache__, and node_modules
+
+5. **Structured Processing (llmfiles/structured_processing/)**
    - Language-specific parsers using tree-sitter
    - `python_parser.py`: Extracts functions, classes from Python files
    - `javascript_parser.py`: Handles JavaScript/TypeScript files
    - `ast_utils.py`: Common AST manipulation utilities
 
-5. **CLI Interface (llmfiles/cli/interface.py)**
+6. **CLI Interface (llmfiles/cli/interface.py)**
    - Click-based command structure
    - Handles file paths, GitHub URLs, and stdin input
    - Progress reporting via Rich library
@@ -113,6 +124,7 @@ llmfiles . --max-size 500KB --include "**/*.py" --exclude "**/test_*"
 - **File-first Chunking**: By default, files are included as complete units (simpler, no duplication)
 - **Optional Semantic Chunking**: Use `--chunk-strategy structure` to parse into functions/classes
 - **Dependency Graph Building**: Starting from seed files, follows imports to build complete context
+- **Import Tracing**: Use `--trace-calls` to trace all imports using AST parsing (finds lazy imports, supports src-layout)
 - **Remote Source Support**: GitHub URLs are cloned to temp directories and processed like local paths
 - **Stream Processing**: Designed for Unix-style composability with pipes
 
@@ -120,3 +132,8 @@ llmfiles . --max-size 500KB --include "**/*.py" --exclude "**/test_*"
 
 - `.llmfiles.toml`: Project-specific profiles and patterns
 - Respects `.gitignore` by default (can be overridden with `--no-ignore`)
+
+### Documentation
+
+- `spec.md`: Test coverage specification - keep updated when adding/modifying features
+- `CHANGELOG.md`: Document all user-facing changes (follow semantic versioning)

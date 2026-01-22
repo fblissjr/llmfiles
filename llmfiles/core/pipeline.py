@@ -15,7 +15,7 @@ from llmfiles.core.processing import process_file_content_to_elements
 from llmfiles.exceptions import SmartPromptBuilderError
 from llmfiles.structured_processing.language_parsers.python_parser import extract_python_imports
 from llmfiles.core.discovery.dependency_resolver import resolve_import
-from llmfiles.core.jedi_tracer import CallTracer
+from llmfiles.core.import_tracer import CallTracer
 
 log = structlog.get_logger(__name__)
 
