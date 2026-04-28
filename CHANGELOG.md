@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.12.0
+
+### Added
+- Friendlier `-i`/`-e` pattern shorthand to reduce glob friction:
+  - Bare extensions: `-i py` is equivalent to `-i "**/*.py"`
+  - Comma-separated patterns: `-i py,md` or `-e scripts,tests` works in a single flag
+  - Directories auto-expand on both include and exclude (previously only on include): `-e scripts` now means `-e "scripts/**"`
+  - Filenames and explicit globs still work as before
+  - Examples that now do what they look like:
+    - `llmfiles . -i py -e scripts -e tests`
+    - `llmfiles . -i py,md -e CHANGELOG.md`
+    - `llmfiles . -e uv.lock`
+
 ## 0.11.0
 
 ### Added

@@ -1,176 +1,60 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) when working in this repo.
 
-## Project Overview
+## What this is
 
-llmfiles is a Python CLI tool that intelligently packages code and text into a single file optimized for LLMs. It supports:
-- **GitHub repository processing**: Clone and process public repos directly from URLs
-- **Tree-sitter semantic parsing**: Optional structure-aware chunking for Python and JavaScript
-- **Automatic dependency resolution**: Follow Python imports to build complete context
-- **AST-based import tracing**: Trace all imports from entry files using pure AST parsing (Python only). Finds lazy imports, supports src-layout projects.
+`llmfiles` is a Python CLI that packages a directory (or a GitHub repo URL) into a single LLM-friendly text blob. Beyond plain concatenation it offers:
 
-## Development Commands
+- Tree-sitter chunking into functions/classes (`--chunk-strategy structure`).
+- Python AST-based import tracing (`--deps`, optionally `--deps --all`) to pull in just the dependencies a seed file actually uses.
+- Friendly include/exclude shorthand (bare extensions, dirs, comma lists).
 
-### Installation and Setup
+User-facing behaviour and CLI examples live in `README.md`. Don't duplicate them here.
+
+## Dev commands
+
 ```bash
-# Create and activate virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On macOS/Linux
-
-# Install package in development mode with all dependencies
-uv pip install -e ".[dev]"
+uv sync --extra dev          # install deps (incl. ruff/mypy/pytest-cov)
+uv run pytest                # full test suite
+uv run pytest tests/test_pattern_expansion.py -v
+uv run ruff check llmfiles/
+uv run mypy llmfiles/
 ```
 
-### Running Tests
-```bash
-# Run all tests
-pytest
-
-# Run tests with coverage
-pytest --cov=llmfiles
-
-# Run specific test file
-pytest tests/test_processing.py
-
-# Run specific test
-pytest tests/test_processing.py::test_function_name
-```
-
-### Code Quality
-```bash
-# Run linting
-ruff check llmfiles/
-
-# Run type checking
-mypy llmfiles/
-```
-
-### CLI Usage
-```bash
-# Basic usage - process current directory
-llmfiles
-
-# Process a GitHub repository directly
-llmfiles https://github.com/user/repo
-llmfiles https://github.com/user/repo --include "**/*.py"
-
-# Process specific files with dependency resolution
-llmfiles src/main.py -r
-
-# Smart import tracing with unused symbol filtering (recommended)
-llmfiles main.py --deps
-
-# Trace ALL imports without filtering (when --deps misses something)
-llmfiles main.py --deps --all
-
-# Legacy alias for --deps --all (backward compatible)
-llmfiles main.py --trace-calls
-
-# Search for files containing specific content
-llmfiles . --grep-content "pattern"
-
-# Include specific file patterns
-llmfiles --include "**/*.py"
-
-# Use structure-aware chunking (extract functions/classes)
-llmfiles --chunk-strategy structure --include "**/*.py"
-
-# Exclude files larger than 1MB
-llmfiles . --max-size 1MB
-
-# Include binary files (excluded by default)
-llmfiles . --include-binary
-
-# Combine filters
-llmfiles . --max-size 500KB --include "**/*.py" --exclude "**/test_*"
-```
+Always go through `uv` — never bare `python`, `pip`, or `pytest`. Never edit `uv.lock` by hand.
 
 ## Architecture
 
-### Core Components
+Top-level package: `llmfiles/`
 
-1. **Pipeline (llmfiles/core/pipeline.py)**
-   - `PromptGenerator` class orchestrates the entire processing flow
-   - Handles dependency resolution, file processing, and output formatting
-   - Manages external dependency tracking
+- `cli/interface.py` — Click entrypoint. Parses flags, clones GitHub URLs into temp dirs, builds `PromptConfig`, hands off to `PromptGenerator`.
+- `config/settings.py` — `PromptConfig` dataclass + enums (`ChunkStrategy`, `ExternalDepsStrategy`, `OutputFormat`).
+- `core/`
+  - `pipeline.py` — `PromptGenerator` orchestrates discovery → processing → templating → output.
+  - `github.py` — `is_github_url`, `clone_github_repo` (shallow). CLI cleans the temp dir in a `finally`.
+  - `output.py` — stdout / file writers.
+  - `import_tracer.py` — pure-AST import walk for Python. Finds lazy imports inside functions, supports src-layout and relative imports, skips venv/`__pycache__`/`node_modules`. Smart symbol filtering only follows imports for symbols actually referenced.
+  - `discovery/`
+    - `walker.py` — `discover_paths` (file walk, gitignore, hidden, git-since, include/exclude) and `grep_files_for_content`.
+    - `pattern_expansion.py` — turns user shorthand into gitignore globs (`py` → `**/*.py`, `scripts` → `scripts/**`, `py,md` → both). Applied to both `-i` and `-e`.
+    - `pattern_matching.py` — gitignore + glob compilation via `pathspec`.
+    - `path_resolution.py`, `git_utils.py`, `dependency_resolver.py` — supporting helpers.
+- `structured_processing/` — tree-sitter parsers (`python_parser.py`, `javascript_parser.py`, `ast_utils.py`).
 
-2. **GitHub Support (llmfiles/core/github.py)**
-   - `is_github_url()`: Detects GitHub repository URLs
-   - `clone_github_repo()`: Clones repos to temp directories using shallow clone
-   - Auto-cleanup after processing via CLI finally block
+## Design notes
 
-3. **Discovery Module (llmfiles/core/discovery/)**
-   - `walker.py`: File system traversal with gitignore support
-   - `dependency_resolver.py`: Python import resolution and dependency tracking
-   - `pattern_matching.py`: Glob pattern matching for file selection
-   - `path_resolution.py`: Path normalization and resolution
-   - `git_utils.py`: Git command execution for --git-since filtering
+- File-first by default; structure-aware chunking is opt-in.
+- Dependency expansion has two modes: `-r/--recursive` (simple import resolver) and `--deps` (AST tracer with optional `--all` to disable symbol filtering). `--trace-calls` is a deprecated alias for `--deps --all`.
+- Discovery is gitignore-aware unless `--no-ignore`.
+- GitHub URLs become regular local paths post-clone, so the rest of the pipeline doesn't care.
 
-4. **Import Tracer (llmfiles/core/import_tracer.py)**
-   - AST-based import tracing for Python files
-   - Finds all imports including lazy imports inside functions
-   - Supports src-layout projects and relative imports
-   - Fast and reliable - pure AST parsing, no code execution
-   - Automatically excludes venvs, __pycache__, and node_modules
-   - Smart symbol filtering: only follows imports for symbols actually used in code
+## Workflow when changing things
 
-5. **Structured Processing (llmfiles/structured_processing/)**
-   - Language-specific parsers using tree-sitter
-   - `python_parser.py`: Extracts functions, classes from Python files
-   - `javascript_parser.py`: Handles JavaScript/TypeScript files
-   - `ast_utils.py`: Common AST manipulation utilities
+1. Read this file for orientation; check `spec.md` for existing test coverage in the area you touch.
+2. TDD: red → green → refactor. New tests update `spec.md`.
+3. If user-facing CLI behaviour changes: update help text in `cli/interface.py`, examples in `README.md`, and add a `CHANGELOG.md` entry under a new minor version (semver, no dates, no major bumps without asking).
+4. If architecture changes: update this file.
+5. `uv run pytest` before considering it done.
 
-6. **CLI Interface (llmfiles/cli/interface.py)**
-   - Click-based command structure
-   - Handles file paths, GitHub URLs, and stdin input
-   - Progress reporting via Rich library
-
-### Key Design Patterns
-
-- **File-first Chunking**: By default, files are included as complete units (simpler, no duplication)
-- **Optional Semantic Chunking**: Use `--chunk-strategy structure` to parse into functions/classes
-- **Dependency Graph Building**: Starting from seed files, follows imports to build complete context
-- **Import Tracing**: Use `--deps` for smart import tracing with unused symbol filtering, or `--deps --all` to trace all imports (finds lazy imports, supports src-layout)
-- **Remote Source Support**: GitHub URLs are cloned to temp directories and processed like local paths
-- **Stream Processing**: Designed for Unix-style composability with pipes
-
-### Configuration
-
-- `.llmfiles.toml`: Project-specific profiles and patterns
-- Respects `.gitignore` by default (can be overridden with `--no-ignore`)
-
-### Documentation
-
-- `spec.md`: Test coverage specification - the living checklist of what's tested
-- `CHANGELOG.md`: User-facing changes (semantic versioning, no dates)
-
-## Development Workflow
-
-When making changes to this codebase, follow this checklist:
-
-### Before Starting
-1. Read this file (CLAUDE.md) for architecture context
-2. Check `spec.md` for existing test coverage of the area you're modifying
-
-### When Adding Features
-1. Write tests first (TDD) - update `spec.md` checklist as you go
-2. Implement the feature
-3. Update CLI help text if adding flags/options
-4. Add entry to `CHANGELOG.md` under appropriate version heading
-
-### When Fixing Bugs
-1. Add a failing test that reproduces the bug
-2. Fix the bug
-3. Update `spec.md` if test coverage changed
-4. Add entry to `CHANGELOG.md` if user-facing
-
-### After Completing Work
-Always update these files (check each one):
-- [ ] `spec.md` - Mark new tests as `[x]`, add new test items
-- [ ] `CHANGELOG.md` - Document user-facing changes
-- [ ] `CLAUDE.md` - Update if architecture/CLI usage changed
-- [ ] Run `uv run pytest` to verify all tests pass
-
-### Key Principle
-**Single source of truth**: Don't duplicate information across files. CLAUDE.md describes architecture, spec.md tracks test coverage, CHANGELOG.md tracks releases. Each file has one job.
+Single source of truth: this file = architecture, `README.md` = user docs, `spec.md` = test coverage, `CHANGELOG.md` = releases. Don't duplicate.

@@ -1,7 +1,7 @@
 # llmfiles/core/discovery/walker.py
 import os
 from pathlib import Path
-from typing import Iterator, Dict, Optional, Set, List
+from typing import Iterator, Dict, Optional, Set
 import structlog
 
 from llmfiles.config.settings import PromptConfig
@@ -12,6 +12,7 @@ from llmfiles.core.discovery.pattern_matching import (
     is_path_gitignored,
     pathspec
 )
+from llmfiles.core.discovery.pattern_expansion import expand_user_patterns
 from llmfiles.core.discovery.git_utils import get_git_modified_files
 
 log = structlog.get_logger(__name__)
@@ -23,20 +24,14 @@ def discover_paths(config: PromptConfig) -> Iterator[Path]:
     #
     log.info("path_discovery_walker_started", base_dir=str(config.base_dir))
 
-    # if the user provides a simple directory name as an include pattern,
-    # convert it to a glob pattern that matches its contents.
-    include_patterns: List[str] = []
-    for p in config.include_patterns:
-        if Path(p).is_dir():
-            include_patterns.append(f"{p.rstrip('/')}/**/*")
-        else:
-            include_patterns.append(p)
+    include_patterns = expand_user_patterns(config.include_patterns, config.base_dir)
+    exclude_patterns = expand_user_patterns(config.exclude_patterns, config.base_dir)
 
     if not include_patterns:
         include_patterns.append('**/*')
 
     include_spec = compile_glob_patterns_to_spec(include_patterns)
-    exclude_spec = compile_glob_patterns_to_spec(config.exclude_patterns)
+    exclude_spec = compile_glob_patterns_to_spec(exclude_patterns)
     assert include_spec is not None
 
     seed_paths = resolve_initial_seed_paths(config)

@@ -1,205 +1,115 @@
 # llmfiles
 
-a developer-focused command-line tool to intelligently package code and text into a single file, optimized for large language models.
+a developer-focused cli for packaging code into a single, llm-friendly text blob.
 
-it moves beyond simple file concatenation by using tree-sitter to parse code into semantic chunks (functions, classes, etc.), providing llms with clean, labeled context.
+beyond plain concatenation: tree-sitter chunking, ast-based python import tracing, content search, and a pattern shorthand that doesn't make you fight your shell.
 
-## features
-
--   **github repository support:** process remote github repositories directly by passing a url - no manual cloning required.
--   **import tracing:** use `--trace-calls` to trace all imports from entry files using AST parsing, building a complete dependency graph (Python only). finds all imports including lazy imports inside functions. fast and reliable - no code execution needed.
--   **recursive dependency resolution:** for python, automatically finds and includes files that are imported by your seed files, providing much richer context.
--   **content-based file search:** use the `--grep-content` flag to select files based on a text pattern in their content, not just their file path.
--   **intelligent code chunking:** optionally parse supported languages (python, javascript) into logical units like functions and classes with `--chunk-strategy structure`.
--   **smart file filtering:** automatically excludes binary files and supports size-based filtering to skip large files.
--   **`.gitignore` aware:** respects your project's `.gitignore` files by default.
--   **flexible file selection:** include and exclude files using familiar glob patterns.
--   **standard unix-style composability:** designed to work with pipes and other standard cli tools like `find`, `sort`, and `xargs`.
--   **clean, llm-optimized output:** generates a structured markdown format that clearly labels each code element with its type, name, and source file.
-
-## installation
+## install
 
 ```bash
 uv pip install .
 ```
 
-## usage
-
-the core command structure is simple:
-`llmfiles [options] [paths...]`
-
-if no `paths` are specified, it processes the current directory. it can also read paths from stdin.
-
-**example 1: process a github repository**
+## quick start
 
 ```bash
-# process a public github repository directly
-llmfiles https://github.com/user/repo
-
-# include only python files from a github repo
-llmfiles https://github.com/user/repo --include "**/*.py"
-
-# limit file sizes when processing large repos
-llmfiles https://github.com/user/repo --max-size 100KB --include "**/*.py"
+llmfiles                              # current directory
+llmfiles https://github.com/user/repo # remote repo (cloned to temp, cleaned up)
+llmfiles -i py                        # all *.py files in cwd
+llmfiles -i py,md -e CHANGELOG.md     # *.py and *.md, except changelog
+llmfiles . -i py -e scripts -e tests  # *.py, excluding scripts/ and tests/
+llmfiles . -e uv.lock                 # everything except uv.lock
+llmfiles src/main.py --deps           # main.py + the imports it actually uses
 ```
 
-the repository is cloned to a temp directory, processed, and automatically cleaned up.
+## filter shorthand (`-i` / `-e`)
 
-**example 2: process all python files in the current project**
+both flags accept the same lightweight syntax. each value can be:
+
+| you write | becomes | meaning |
+|---|---|---|
+| `py` | `**/*.py` | bare extension |
+| `py,md` | `**/*.py`, `**/*.md` | comma-separated list |
+| `scripts` | `scripts/**` | existing directory |
+| `scripts/` | `scripts/**` | trailing slash also works |
+| `CHANGELOG.md` | `CHANGELOG.md` | filename (matched at any depth, gitignore-style) |
+| `**/*.py` | unchanged | explicit glob passes through |
+
+flags are repeatable, so `-e scripts -e tests` and `-e scripts,tests` are equivalent.
+
+## examples
+
+**process a github repo, python only, skip large files**
 
 ```bash
-llmfiles --include "**/*.py"
+llmfiles https://github.com/user/repo -i py --max-size 100KB
 ```
 
-this will include all python files and print the structured markdown to stdout.
-
-**example 3: process specific files and pipe to a clipboard utility**
+**dependency-aware bundling (python)**
 
 ```bash
-llmfiles ./src/main.py ./src/utils.py | pbcopy
+llmfiles src/main.py --deps          # main.py + only the symbols it uses
+llmfiles src/main.py --deps --all    # main.py + everything it imports
 ```
 
-**example 4: combine with `find` to process recently modified javascript files**
+`--deps` follows imports recursively using pure ast parsing (no execution), finds lazy imports inside functions, and respects src-layout. add `--all` if smart filtering misses something.
 
-```bash
-find . -type f -name '*.js' -mtime -3 -print0 | llmfiles --stdin -0
-```
-the `-print0` for `find` and `-0` for `llmfiles` handle filenames with spaces correctly.
-
-**example 5: use structure-aware chunking**
-
-by default, files are included as whole units. use `--chunk-strategy structure` to parse python and javascript into separate functions and classes.
-
-```bash
-llmfiles --chunk-strategy structure --include "src/**/*.py"
-```
-
-**example 6: automatic dependency resolution**
-
-start with a single entrypoint file, and `llmfiles` will follow its internal imports to build a comprehensive context.
-
-```bash
-# main.py imports utils.py, which imports helpers.py
-# llmfiles will automatically include all three files in the output.
-llmfiles src/main.py
-```
-
-**example 7: import tracing (python)**
-
-for deeper analysis, use `--trace-calls` to trace all imports from entry files using AST parsing. this finds all imports including lazy imports inside functions, and supports src-layout projects.
-
-```bash
-# trace all imports from main.py to build a complete dependency graph
-llmfiles main.py --trace-calls
-
-# the output includes an import dependency graph showing relationships between files
-```
-
-**example 8: find files by content (`grep`)**
-
-you don't know the file name, but you know it contains the text "qwen image edit". use `--grep-content` to find it and all of its dependencies.
+**find files by content, then bundle them**
 
 ```bash
 llmfiles . --grep-content "qwen image edit"
 ```
 
-**example 9: list external dependencies**
+selects files containing the string and uses them as seeds for dependency resolution.
 
-to see which external libraries a file depends on, use `--external-deps metadata`.
+**structure-aware chunking (functions/classes instead of whole files)**
+
+```bash
+llmfiles --chunk-strategy structure -i py
+```
+
+**combine with `find` for something dynamic**
+
+```bash
+find . -type f -name '*.js' -mtime -3 -print0 | llmfiles --stdin -0
+```
+
+**only files modified recently in git**
+
+```bash
+llmfiles . --git-since "7 days ago" -i py
+llmfiles . --git-since "2025-01-01"
+```
+
+**list external dependencies a file pulls in**
 
 ```bash
 llmfiles src/utils.py --external-deps metadata
 ```
-this will add a list of packages like `numpy` or `pandas` to the output for that file.
 
-**example 10: exclude large files**
-
-skip files larger than a specified size to avoid including massive data files, logs, or compiled assets.
+**pipe to clipboard**
 
 ```bash
-# exclude files larger than 1MB
-llmfiles . --max-size 1MB
-
-# exclude files larger than 500KB
-llmfiles . --max-size 500KB
+llmfiles src/main.py src/utils.py | pbcopy
 ```
 
-**example 11: include binary files**
+## options
 
-by default, binary files (detected by UTF-8 decode errors) are excluded. to include them:
+run `llmfiles --help` for the full list. the high-traffic flags:
 
-```bash
-llmfiles . --include-binary
-```
-
-**example 12: only include recently modified files (git)**
-
-filter files based on when they were last modified in git. useful for reviewing recent changes or creating context for recent work.
-
-```bash
-# files modified in the last 7 days
-llmfiles . --git-since "7 days ago"
-
-# files modified since a specific date
-llmfiles . --git-since "2025-01-01"
-
-# files modified in the last week
-llmfiles . --git-since "1 week ago"
-
-# combine with other filters
-llmfiles . --git-since "3 days ago" --include "**/*.py"
-```
-
-## all options
-
-```text
-$ llmfiles --help
-usage: llmfiles [options] [paths...]
-
-  aggregate and format specified file content into a single text block.
-
-  reads files from specified paths or from standard input. if no paths are
-  given and stdin is not used, it processes the current directory.
-
-options:
-  -i, --include pattern   glob pattern for files to include. can be used
-                          multiple times.
-  -e, --exclude pattern   glob pattern for files to exclude. can be used
-                          multiple times.
-  --grep-content pattern  search file contents for a pattern and include
-                          matching files as seeds for dependency resolution.
-  --chunk-strategy [structure|file]
-                          strategy for chunking files. 'file' (default)
-                          treats each file as a single chunk. 'structure'
-                          uses ast parsing for supported languages.
-  --external-deps [ignore|metadata]
-                          strategy for handling external dependencies: 'ignore'
-                          or 'metadata'.
-  --no-ignore             do not respect .gitignore files.
-  --hidden                include hidden files and directories (starting with
-                          a dot).
-  --include-binary        include binary files (detected by UTF-8 decode
-                          errors). by default, binary files are excluded.
-  --max-size SIZE         exclude files larger than specified size (e.g.,
-                          '1MB', '500KB', '10MB'). accepts units: B, KB, MB, GB.
-  --git-since DATE        only include files modified in git since the
-                          specified date (e.g., '7 days ago', '2025-01-01',
-                          '1 week ago').
-  -l, --follow-symlinks   follow symbolic links.
-  -n, --line-numbers      prepend line numbers to file content.
-  --no-codeblock          omit markdown code blocks around file content.
-  -o, --output file       write output to file instead of stdout.
-  --stdin                 read file paths from standard input.
-  -0, --null              when using --stdin, paths are separated by a nul
-                          character.
-  -r, --recursive         recursively include all local code imported by the
-                          seed files.
-  --trace-calls           trace all imports from entry files using AST parsing
-                          (Python only). finds lazy imports, supports src-layout.
-  -v, --verbose           enable verbose logging output to stderr.
-  --version               show the version and exit.
-  -h, --help              show this message and exit.
-```
+- `-i, --include` / `-e, --exclude` — see shorthand table above; repeatable.
+- `--deps` / `--deps --all` — python ast import tracing.
+- `-r, --recursive` — simple import-based dependency expansion (lighter than `--deps`).
+- `--grep-content TEXT` — content-based file selection.
+- `--chunk-strategy [file|structure]` — file-level (default) or function/class-level chunks.
+- `--max-size SIZE` — skip files larger than e.g. `1MB`, `500KB`.
+- `--git-since DATE` — only files modified in git since the given date.
+- `--include-binary` — binaries are skipped by default.
+- `--no-ignore` — bypass `.gitignore`.
+- `--hidden` — include dotfiles/dot-dirs.
+- `-o, --output FILE` — write to file instead of stdout.
+- `--stdin` / `-0` — read paths from stdin (nul-separated with `-0`).
+- `--format [compact|verbose]` — output format. `compact` (default) is tuned for llm consumption.
 
 ## license
 

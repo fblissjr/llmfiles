@@ -77,12 +77,20 @@ def _print_summary_to_console(included_files: List[dict]):
 @click.option(
     "-i", "--include", "include_patterns",
     multiple=True,
-    help="glob pattern for files to include. can be used multiple times."
+    help=(
+        "files to include. accepts: bare extensions (`py` -> `**/*.py`), "
+        "directories (`src` -> `src/**`), filenames (`CHANGELOG.md`), or "
+        "explicit globs (`**/*.py`). comma-separate to combine "
+        "(`-i py,md`). repeatable."
+    )
 )
 @click.option(
     "-e", "--exclude", "exclude_patterns",
     multiple=True,
-    help="glob pattern for files to exclude. can be used multiple times."
+    help=(
+        "files to exclude. same shorthand as --include "
+        "(`-e scripts,tests`, `-e uv.lock`, `-e py`). repeatable."
+    )
 )
 @click.option(
     "--grep-content", "grep_content_pattern",
